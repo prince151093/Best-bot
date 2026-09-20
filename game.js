@@ -197,37 +197,138 @@ async function handle(message){
       const RESET_PASSWORD='admin@151093';
       const supplied=args[0]||'';
       if(supplied!==RESET_PASSWORD) return message.reply('❌ Invalid admin reset password.');
+
+      // Full gameplay reset: clears ownership, balance, XP/progression, missions,
+      // achievements and legacy activity counters. Transaction history is preserved.
+      const resetUser=async (userId)=>{
+        // Cancel active marketplace listings first so deleting ownership cannot
+        // leave orphaned listings.
+        const listings=await sb.from('marketplace')
+          .select('id')
+          .eq('guild_id',gid)
+          .eq('seller_id',userId)
+          .eq('status','active');
+        if(listings.error) throw listings.error;
+
+        if((listings.data||[]).length){
+          const cancelled=await sb.from('marketplace')
+            .update({status:'cancelled'})
+            .eq('guild_id',gid)
+            .eq('seller_id',userId)
+            .eq('status','active');
+          if(cancelled.error) throw cancelled.error;
+        }
+
+        // Remove all owned vehicles.
+        const delVehicles=await sb.from('user_vehicles')
+          .delete()
+          .eq('guild_id',gid)
+          .eq('user_id',userId);
+        if(delVehicles.error) throw delVehicles.error;
+
+        // Reset the actual game profile. Keep the row so profile() does NOT
+        // recreate it with the default starting balance.
+        const resetProfile=await sb.from('game_profiles')
+          .update({
+            balance:0,
+            driver_xp:0,
+            driver_level:1,
+            daily_streak:0,
+            daily_claimed_on:null,
+            active_vehicle_id:null,
+            race_vehicle_id:null,
+            updated_at:new Date().toISOString()
+          })
+          .eq('guild_id',gid)
+          .eq('user_id',userId);
+        if(resetProfile.error) throw resetProfile.error;
+
+        // Reset legacy progression/activity storage too.
+        const resetLegacy=await sb.from('users')
+          .update({
+            vehicle_index:0,
+            messages:0,
+            vc_seconds:0,
+            last_vc_join:null,
+            updated_at:Math.floor(Date.now()/1000)
+          })
+          .eq('guild_id',gid)
+          .eq('user_id',userId);
+        if(resetLegacy.error) throw resetLegacy.error;
+
+        // Clear the in-memory db.js cache as well, otherwise its stale values
+        // could be written back later and restore the old progression.
+        const legacyDb=require('./db');
+        if(typeof legacyDb.resetUserProgress==='function'){
+          legacyDb.resetUserProgress(userId,gid);
+        }
+
+        // Reset current missions/achievements for this player.
+        const delMissions=await sb.from('missions')
+          .delete()
+          .eq('guild_id',gid)
+          .eq('user_id',userId);
+        if(delMissions.error) throw delMissions.error;
+
+        const delAchievements=await sb.from('achievements')
+          .delete()
+          .eq('guild_id',gid)
+          .eq('user_id',userId);
+        if(delAchievements.error) throw delAchievements.error;
+      };
+
       const targetToken=(args[1]||'').toLowerCase();
       const target=message.mentions.users.first();
-      const resetUser=async (userId)=>{
-        // Remove active marketplace listings first so deleting ownership cannot leave orphaned listings.
-        const listings=await sb.from('marketplace').select('id').eq('guild_id',gid).eq('seller_id',userId).eq('status','active');
-        if(listings.error) throw listings.error;
-        if((listings.data||[]).length) await sb.from('marketplace').update({status:'cancelled'}).eq('guild_id',gid).eq('seller_id',userId).eq('status','active');
-        const delVehicles=await sb.from('user_vehicles').delete().eq('guild_id',gid).eq('user_id',userId);
-        if(delVehicles.error) throw delVehicles.error;
-        const resetProfile=await sb.from('game_profiles').update({active_vehicle_id:null,race_vehicle_id:null}).eq('guild_id',gid).eq('user_id',userId);
-        if(resetProfile.error) throw resetProfile.error;
-        const resetLegacy=await sb.from('users').update({vehicle_index:0,messages:0,vc_seconds:0,last_vc_join:null}).eq('guild_id',gid).eq('user_id',userId);
-        if(resetLegacy.error) throw resetLegacy.error;
-        await sb.from('missions').delete().eq('guild_id',gid).eq('user_id',userId);
-        await sb.from('achievements').delete().eq('guild_id',gid).eq('user_id',userId);
-      };
+
       if(targetToken==='everyone'){
-        if(!message.member.permissions.has('ManageGuild')) return message.reply('❌ Manage Server required for `everyone`.');
+        if(!message.member.permissions.has('ManageGuild')){
+          return message.reply('❌ Manage Server required for `everyone`.');
+        }
+
+        const ids=[];
         const r=await sb.from('users').select('user_id').eq('guild_id',gid);
         if(r.error) throw r.error;
-        const ids=[...new Set((r.data||[]).map(x=>x.user_id))];
+        ids.push(...(r.data||[]).map(x=>x.user_id));
+
         const gp=await sb.from('game_profiles').select('user_id').eq('guild_id',gid);
         if(gp.error) throw gp.error;
-        for(const x of gp.data||[]) ids.push(x.user_id);
-        const unique=[...new Set(ids)];
+        ids.push(...(gp.data||[]).map(x=>x.user_id));
+
+        const uv=await sb.from('user_vehicles').select('user_id').eq('guild_id',gid);
+        if(uv.error) throw uv.error;
+        ids.push(...(uv.data||[]).map(x=>x.user_id));
+
+        const unique=[...new Set(ids.filter(Boolean))];
         for(const id of unique) await resetUser(id);
-        return message.reply(`🧹 **Full reset complete.** Reset **${unique.length}** player(s): inventory cleared, VC time set to **0**, messages set to **0**, progression reset. Balances were preserved.`);
+
+        return message.reply(
+          `🧹 **Full reset complete.** Reset **${unique.length}** player(s).\n`+
+          `💰 Balance: **₹0**\n`+
+          `🚗 Vehicles: **0**\n`+
+          `🎤 VC time: **0**\n`+
+          `💬 Messages: **0**\n`+
+          `⭐ Driver XP: **0**\n`+
+          `🏁 Active/Race vehicle: **None**`
+        );
       }
-      if(!target) return message.reply('❌ Use `?adminreset <password> @user` or `?adminreset <password> everyone`.');
+
+      if(!target){
+        return message.reply(
+          '❌ Use `?adminreset <password> @user` or `?adminreset <password> everyone`.'
+        );
+      }
+
       await resetUser(target.id);
-      return message.reply(`🧹 **Reset complete for ${target}.** Inventory cleared, VC time **0**, messages **0**, progression reset. Balance preserved.`);
+
+      return message.reply(
+        `🧹 **Reset complete for ${target}.**\n`+
+        `💰 Balance: **₹0**\n`+
+        `🚗 Vehicles: **0**\n`+
+        `🎤 VC time: **0**\n`+
+        `💬 Messages: **0**\n`+
+        `⭐ Driver XP: **0**\n`+
+        `🏁 Active/Race vehicle: **None**`
+      );
     }
     if(cmd==='?admin'){if(!message.member.permissions.has('ManageGuild')) return message.reply('❌ Manage Server required.'); const sub=(args[0]||'help').toLowerCase(); if(sub==='give'){const target=message.mentions.users.first(),amt=Number(args[1]); if(!target||!amt) return message.reply('❌ `?admin give @user amount`'); await changeBalance(gid,target.id,amt,'admin_grant',uid); return message.reply(`👑 Gave ${money(amt)} to ${target}.`);} if(sub==='take'){const target=message.mentions.users.first(),amt=Number(args[1]); if(!target||!amt) return message.reply('❌ `?admin take @user amount`'); await changeBalance(gid,target.id,-amt,'admin_remove',uid); return message.reply(`👑 Removed ${money(amt)} from ${target}.`);} if(sub==='players'){const r=await sb.from('game_profiles').select('*').eq('guild_id',gid).order('updated_at',{ascending:false}).limit(50); return message.reply((r.data||[]).map(x=>`<@${x.user_id}> • ${money(x.balance)} • Lv.${x.driver_level}`).join('\n')||'No registered players.');} return message.reply('👑 Admin: `?admin give @user amount`, `?admin take @user amount`, `?admin players`');}
     if(cmd==='?help'||cmd==='?commands'){return false;}
