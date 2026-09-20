@@ -248,6 +248,20 @@ function removeInstagram(userId, guildId) {
   });
 }
 
+
+// Reset gameplay/progression values in the in-memory legacy cache as well as Supabase.
+// This prevents stale cached vehicle_index/messages/VC values from being written back.
+function resetUserProgress(userId, guildId) {
+  const user = ensureUser(userId, guildId);
+  user.messages = 0;
+  user.vc_seconds = 0;
+  user.vehicle_index = 0;
+  user.last_vc_join = null;
+  user.updated_at = Math.floor(Date.now() / 1000);
+  queueSave(user);
+  return { ...user };
+}
+
 module.exports = {
   init,
   ensureUser,
@@ -258,6 +272,7 @@ module.exports = {
   clearVcJoin,
   settleVcSession,
   setVehicleIndex,
+  resetUserProgress,
   topUsers,
   setInstagram,
   removeInstagram,
