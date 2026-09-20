@@ -6,5 +6,6 @@ module.exports = {
   guildId: process.env.GUILD_ID || null,
   topGaragesChannelId: process.env.TOP_GARAGES_CHANNEL_ID || null,
   supabaseUrl: process.env.SUPABASE_URL || "",
-  supabaseServiceRoleKey: process.env.SUPABASE_SERVICE_ROLE_KEY || ""
+  supabaseServiceRoleKey: process.env.SUPABASE_SERVICE_ROLE_KEY || "",
+  adminResetPassword: process.env.ADMIN_RESET_PASSWORD || ""
 };
