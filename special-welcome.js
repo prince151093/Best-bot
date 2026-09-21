@@ -12,9 +12,13 @@ const TEMPLATE_FILE = path.join(__dirname, 'assets', 'special-welcome-template.p
 const LAYOUT = {
   leftAvatar: { x: 177, y: 300, r: 128 },
   rightAvatar: { x: 1153, y: 300, r: 128 },
-  leftName: { x: 105, y: 497, width: 275, maxSize: 31 },
-  rightName: { x: 973, y: 497, width: 300, maxSize: 31 },
+  // Text-safe areas are INSIDE the actual neon name plates. Nothing is
+  // allowed to render outside these bounds, even with very long/stylized names.
+  leftName: { x: 125, y: 497, width: 235, maxSize: 31 },
+  rightName: { x: 1055, y: 497, width: 250, maxSize: 31 },
   center: { x: 677, y: 410, width: 535, maxSize: 54 }
+  // Avatar circles and text areas are also hard-clipped below.
+
 };
 
 function loadConfig() {
@@ -79,26 +83,55 @@ async function drawAvatar(ctx, avatarBuffer, circle) {
 function drawCenteredText(ctx, text, x, y, maxWidth, startSize) {
   const size = fitFont(ctx, text, maxWidth, startSize, 18, 800);
   ctx.font = `800 ${size}px "Noto Sans", "DejaVu Sans", sans-serif`;
+  const safeText = ellipsizeToFit(ctx, text, maxWidth);
+
+  ctx.save();
+  // Hard horizontal lock for center text as well.
+  ctx.beginPath();
+  ctx.rect(x - maxWidth / 2, y - size, maxWidth, size * 2);
+  ctx.clip();
   ctx.fillStyle = '#ffffff';
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
   ctx.shadowColor = 'rgba(0,0,0,0.75)';
   ctx.shadowBlur = 7;
-  ctx.fillText(text, x, y);
-  ctx.shadowBlur = 0;
+  ctx.fillText(safeText, x, y);
+  ctx.restore();
 }
 
-function drawName(ctx, text, box, align) {
+function ellipsizeToFit(ctx, text, maxWidth) {
+  if (ctx.measureText(text).width <= maxWidth) return text;
+  const suffix = '…';
+  let value = String(text);
+  while (value.length > 1 && ctx.measureText(value + suffix).width > maxWidth) {
+    value = value.slice(0, -1);
+  }
+  return value + suffix;
+}
+
+function drawClippedText(ctx, text, box, align = 'center') {
   const clean = String(text || '').trim() || 'Member';
-  const size = fitFont(ctx, clean, box.width, box.maxSize, 13, 700);
+  let size = fitFont(ctx, clean, box.width, box.maxSize, 12, 700);
   ctx.font = `700 ${size}px "Noto Sans", "DejaVu Sans", sans-serif`;
+  const safeText = ellipsizeToFit(ctx, clean, box.width);
+
+  ctx.save();
+  // HARD LOCK: pixels from this text operation cannot leave the name plate.
+  ctx.beginPath();
+  ctx.rect(box.x, box.y - box.height / 2, box.width, box.height);
+  ctx.clip();
+
   ctx.fillStyle = '#ffffff';
   ctx.textAlign = align;
   ctx.textBaseline = 'middle';
   ctx.shadowColor = 'rgba(0,0,0,0.9)';
   ctx.shadowBlur = 5;
-  ctx.fillText(clean, box.x, box.y);
-  ctx.shadowBlur = 0;
+  ctx.fillText(safeText, box.textX, box.textY);
+  ctx.restore();
+}
+
+function drawName(ctx, text, box, align) {
+  drawClippedText(ctx, text, box, align);
 }
 
 async function renderWelcome(commandUser, newMember) {
@@ -121,10 +154,22 @@ async function renderWelcome(commandUser, newMember) {
   await drawAvatar(ctx, commandAvatar, LAYOUT.leftAvatar);
   await drawAvatar(ctx, memberAvatar, LAYOUT.rightAvatar);
 
-  // Names are deliberately inset from the Discord logos in the plates.
-  drawName(ctx, `@${commandUser.displayName}`, { ...LAYOUT.leftName, x: 263 }, 'right');
-  drawName(ctx, `@${newMember.displayName}`, { ...LAYOUT.rightName, x: 1015 }, 'left');
+  // Name text is locked inside the two plate borders. The Discord logos are
+  // outside these safe areas, so a long name can never overwrite them.
+  drawName(ctx, `@${commandUser.displayName}`, {
+    ...LAYOUT.leftName,
+    height: 52,
+    textX: LAYOUT.leftName.x + LAYOUT.leftName.width / 2,
+    textY: LAYOUT.leftName.y
+  }, 'center');
+  drawName(ctx, `@${newMember.displayName}`, {
+    ...LAYOUT.rightName,
+    height: 52,
+    textX: LAYOUT.rightName.x + LAYOUT.rightName.width / 2,
+    textY: LAYOUT.rightName.y
+  }, 'center');
 
+  // Center copy is also constrained to its own text area.
   drawCenteredText(ctx, `@${newMember.displayName}`, LAYOUT.center.x, 327, LAYOUT.center.width, 42);
   drawCenteredText(ctx, 'WELCOME', LAYOUT.center.x, 387, LAYOUT.center.width, 56);
   drawCenteredText(ctx, `I AM @${commandUser.displayName}`, LAYOUT.center.x, 448, LAYOUT.center.width, 38);
@@ -235,3 +280,4 @@ module.exports = {
   getChannelId,
   setChannelId
 };
+
