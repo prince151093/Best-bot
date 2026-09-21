@@ -59,6 +59,10 @@ const vehicleNames = [
   'Jaguar F-Type',
   'Mitsubishi Lancer Evolution',
   'Nissan GT-R',
+  'Toyota GR Supra',
+  'Porsche 911',
+  'Acura NSX',
+  'Chevrolet Corvette C8',
   'Lexus LC 500',
   'Ferrari 488 Pista',
   'Chevrolet Corvette',
@@ -66,10 +70,6 @@ const vehicleNames = [
   'Lamborghini Aventador SVJ',
   'Porsche 911 GT3 Touring',
   'McLaren Senna',
-  'Mercedes-AMG C63',
-  'BMW Z4 M40i',
-  'Audi RS5',
-  'Audi RS7',
   'Mercedes-AMG GT',
   'BMW M8',
   'Mercedes-AMG GT 63 S',
@@ -116,16 +116,49 @@ const vehicleNames = [
   'Aston Martin Valkyrie',
   'Gordon Murray T.50',
   'Lotus Evija',
-  'Pininfarina Battista',
+  'Pininfarina Battista'
 ];
 
-const emojis = ["🚲", "🏍️", "🏍️", "🏍️", "🏍️", "🏍️", "🏍️", "🏍️", "🏍️", "🏍️", "🏍️", "🚗", "🚗", "🚗", "🚗", "🚗", "🚗", "🚗", "🚗", "🚗", "🚗", "🚗", "🚗", "🚗", "🚗", "🚗", "🚗", "🚗", "🚗", "🚗", "🚗", "🚗", "🚗", "🚗", "🚗", "🚗", "🚗", "🚗", "🚗", "🚗", "🚗", "🚗", "🚗", "🚗", "🚗", "🚗", "🚗", "🚗", "🚗", "🚗", "🚗", "🚗", "🚗", "🚗", "🚗", "🚗", "🚗", "🚗", "🚗", "🚗", "🚗", "🚗", "🚗", "🚗", "🚗", "🚗", "🚗", "🚗", "🚗", "🚗", "🚗", "🚗", "🚗", "🚗", "🚗", "🚗", "🚗", "🚗", "🚗", "🚗", "🚗", "🚗", "🚗", "🚗", "🚗", "🚗", "🚗", "🚗", "🚗", "🚗", "🚗", "🚗", "🚗", "🚗", "🚗", "🚗", "🚗", "🚗", "🚗", "🚗", "🚗", "🚗", "🚗", "🚗", "🚗", "🚗", "🚗", "🚗", "🚗", "🚗", "🚗", "🚗", "🚗", "🚗", "🚗"];
-const categories = ["bike", "bike", "bike", "bike", "bike", "bike", "bike", "bike", "bike", "bike", "bike", "car", "car", "car", "car", "car", "car", "car", "car", "car", "car", "car", "car", "car", "car", "car", "car", "car", "car", "car", "car", "car", "car", "car", "car", "car", "car", "car", "car", "car", "car", "car", "car", "car", "car", "car", "car", "car", "car", "car", "car", "car", "car", "car", "car", "car", "car", "car", "car", "car", "car", "car", "car", "car", "car", "car", "car", "car", "car", "car", "car", "car", "car", "car", "car", "car", "car", "car", "car", "car", "car", "car", "car", "car", "car", "car", "car", "car", "car", "car", "car", "car", "car", "car", "car", "car", "car", "car", "car", "car", "car", "car", "car", "car", "car", "car", "car", "car", "car", "car", "car", "car", "car", "car", "car"];
+const emojis = [
+  "🚲",
+  "🏍️", "🏍️", "🏍️", "🏍️", "🏍️",
+  "🏍️", "🏍️", "🏍️", "🏍️", "🏍️",
+  "🚗", "🚗", "🚗", "🚗", "🚗", "🚗", "🚗", "🚗", "🚗",
+  "🚗", "🚗", "🚗", "🚗", "🚗", "🚗", "🚗", "🚗", "🚗", "🚗",
+  "🚗", "🚗", "🚗", "🚗", "🚗", "🚗", "🚗", "🚗", "🚗", "🚗",
+  "🚗", "🚗", "🚗", "🚗", "🚗", "🚗", "🚗", "🚗", "🚗", "🚗",
+  "🚗", "🚗", "🚗", "🚗", "🚗", "🚗", "🚗", "🚗", "🚗", "🚗",
+  "🚗", "🚗", "🚗", "🚗", "🚗", "🚗", "🚗", "🚗", "🚗", "🚗",
+  "🚗", "🚗", "🚗", "🚗", "🚗", "🚗", "🚗", "🚗", "🚗", "🚗",
+  "🚗", "🚗", "🚗", "🚗", "🚗", "🚗", "🚗", "🚗", "🚗", "🚗",
+  "🚗", "🚗", "🚗", "🚗", "🚗", "🚗", "🚗", "🚗", "🚗", "🚗",
+  "🚗", "🚗", "🚗", "🚗", "🚗", "🚗", "🚗", "🚗", "🚗", "🚗",
+  "🚗", "🚗", "🚗", "🚗", "🚗"
+];
+
+const categories = [
+  "bike", "bike", "bike", "bike", "bike",
+  "bike", "bike", "bike", "bike", "bike", "bike",
+  "car", "car", "car", "car", "car", "car", "car", "car", "car",
+  "car", "car", "car", "car", "car", "car", "car", "car", "car", "car",
+  "car", "car", "car", "car", "car", "car", "car", "car", "car", "car",
+  "car", "car", "car", "car", "car", "car", "car", "car", "car", "car",
+  "car", "car", "car", "car", "car", "car", "car", "car", "car", "car",
+  "car", "car", "car", "car", "car", "car", "car", "car", "car", "car",
+  "car", "car", "car", "car", "car", "car", "car", "car", "car", "car",
+  "car", "car", "car", "car", "car", "car", "car", "car", "car", "car",
+  "car", "car", "car", "car", "car", "car", "car", "car", "car", "car",
+  "car", "car", "car", "car", "car", "car", "car", "car", "car", "car",
+  "car", "car", "car", "car"
+];
+
 const { validateProgression } = require('./vehicle-progression');
 
 const progression = validateProgression(vehicleNames.length);
+
 const vehicles = vehicleNames.map((name, i) => {
   const req = progression[i];
+
   return {
     id: i + 1,
     name,
