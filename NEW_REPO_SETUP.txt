@@ -1,0 +1,21 @@
+VEHICLE LIFE — FULL 115-VEHICLE NEW REPOSITORY
+
+This package is based on the user's current working bot.
+
+Included:
+- Existing working bot files
+- Existing database/config/progression files
+- 115 vehicle images: vehicle-01.png through vehicle-115.png
+- Updated vehicles.js for the 115-vehicle collection
+
+Step 1 scope:
+- 115 vehicles connected to the existing activity/unlock system
+- No visual customization system
+- Existing bot features preserved
+- No database reset included
+
+Deployment:
+1. Upload/extract the contents of this folder to the root of the new GitHub repository.
+2. Keep your environment secrets (DISCORD_TOKEN, Supabase variables, etc.) in the hosting service; do not commit secrets.
+3. Install dependencies with npm install.
+4. Start with npm start.
