@@ -995,7 +995,7 @@ async function handle(message) {
       const p = await profile(gid, uid), q = await profile(gid, target.id);
       if (p.balance < amount || q.balance < amount) return message.reply('❌ Both players need enough balance for the stake.');
       const id = `${gid}:${uid}:${target.id}:${Date.now()}`;
-      pendingBets.set(id, { guildId: gid, from: uid, to: target.id, amount, expires: Date.now() + 120000 });
+      pendingBets.set(id, { guildId: gid, channelId: message.channel.id, from: uid, to: target.id, amount, expires: Date.now() + 120000, settling: false });
       const row = new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId(`betaccept:${id}`).setLabel('Accept').setStyle(ButtonStyle.Success), new ButtonBuilder().setCustomId(`betdecline:${id}`).setLabel('Decline').setStyle(ButtonStyle.Danger));
       try {
         await target.send({ content: `💵 **BET RACE CHALLENGE**\n${message.member} challenged you to a **${money(amount)}** bet race.\nOnly you can see these buttons.`, components: [row] });
@@ -1338,9 +1338,31 @@ async function handleButton(interaction) {
         const a = await guild.members.fetch(b.from), o = await guild.members.fetch(b.to);
         const result = await runRace(guild, a, 'race', o, { noRewards: true, stake: b.amount, pot: b.amount * 2 });
         if (result.error) throw new Error(result.error);
-        await changeBalance(b.guildId, result.winnerId, b.amount * 2, 'bet_payout', id, { winner: result.winnerId }, false);
+        const pot = b.amount * 2;
+        await changeBalance(b.guildId, result.winnerId, pot, 'bet_payout', id, { winner: result.winnerId }, false);
+
+        const winnerName = result.winnerId === b.from ? a.displayName : o.displayName;
+        const loserId = result.winnerId === b.from ? b.to : b.from;
+        const loserName = result.winnerId === b.from ? o.displayName : a.displayName;
+        const winnerVehicle = result.winnerId === b.from ? result.vehicleA : result.vehicleB;
+        const loserVehicle = result.winnerId === b.from ? result.vehicleB : result.vehicleA;
+        const resultMessage = `💵 **BET RACE RESULT**\n\n${raceText('race', result)}\n\n🏆 **Winner:** <@${result.winnerId}> (${winnerName})\n❌ **Loser:** <@${loserId}> (${loserName})\n🚗 Winner car: ${winnerVehicle?.emoji || '🚗'} **${winnerVehicle?.name || 'Unknown'}**\n🚗 Loser car: ${loserVehicle?.emoji || '🚗'} **${loserVehicle?.name || 'Unknown'}**\n💰 **Stake:** ${money(b.amount)} each\n💰 **Pot won:** ${money(pot)}\n\nThe winner received the full pot; both players' stakes were settled.\n🎉 Thanks for racing!`;
+
         pendingBets.delete(id);
-        return interaction.editReply({ content: `💵 **BET RACE SETTLED**\n${raceText('race', result)}\n💰 Pot **${money(b.amount * 2)}** paid to <@${result.winnerId}>.`, components: [] });
+
+        // Replace the loading buttons immediately with the result in the
+        // challenged player's DM. Then also publish the same result to the
+        // original race channel and both players' DMs so the outcome is never
+        // silently lost if a DM interaction expires.
+        await interaction.editReply({ content: resultMessage, components: [] });
+
+        const channel = guild.channels.cache.get(b.channelId);
+        if (channel && typeof channel.send === 'function') {
+          await channel.send({ content: resultMessage }).catch(() => {});
+        }
+        await a.send({ content: resultMessage }).catch(() => {});
+        await o.send({ content: resultMessage }).catch(() => {});
+        return true;
       } catch (e) {
         await changeBalance(b.guildId, b.from, b.amount, 'bet_refund', id, {}, false).catch(() => {});
         await changeBalance(b.guildId, b.to, b.amount, 'bet_refund', id, {}, false).catch(() => {});
