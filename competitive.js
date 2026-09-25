@@ -20,6 +20,13 @@ const MATCH_HOURS = [17, 18, 19];
 const TZ = process.env.PROGRESSION_TIMEZONE || 'Asia/Kolkata';
 const started = new Set();
 
+// Shared currency formatter for event UI.
+// Keep this local to avoid relying on a missing import/global helper.
+function money(amount) {
+  const value = Number(amount) || 0;
+  return `₹${value.toLocaleString('en-IN')}`;
+}
+
 function isoAtDay(base, dayOffset, hour) {
   const d = new Date(base.getTime() + dayOffset * DAY_MS);
   const parts = new Intl.DateTimeFormat('en-CA', {
