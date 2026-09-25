@@ -85,14 +85,19 @@ async function claimDailyAnnouncement(guildId, kind, key) {
   throw ins.error;
 }
 
-function dailyButtonRows(type) {
-  if (type === 'event') {
-    return [new ActionRowBuilder().addComponents(
-      new ButtonBuilder().setCustomId('event:join:daily').setLabel('🎮 Open Event').setStyle(ButtonStyle.Success),
-      new ButtonBuilder().setCustomId('event:details:daily').setLabel('ℹ️ Details').setStyle(ButtonStyle.Primary),
-      new ButtonBuilder().setCustomId('event:leaderboard:daily').setLabel('🏆 Leaderboard').setStyle(ButtonStyle.Secondary)
-    )];
-  }
+function eventButtonRows(eventId) {
+  const id = String(eventId);
+  return [
+    new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId(`event:join:${id}`).setLabel('🎮 Join Event').setStyle(ButtonStyle.Success),
+      new ButtonBuilder().setCustomId(`event:details:${id}`).setLabel('ℹ️ Details').setStyle(ButtonStyle.Primary),
+      new ButtonBuilder().setCustomId(`event:leaderboard:${id}`).setLabel('🏆 Leaderboard').setStyle(ButtonStyle.Secondary)
+    )
+  ];
+}
+
+function dailyButtonRows(type, eventId = null) {
+  if (type === 'event') return eventButtonRows(eventId || 'daily');
   if (type === 'season') return seasonRows();
   return [new ActionRowBuilder().addComponents(
     button('🏁 Register', 'champ:register', ButtonStyle.Success),
@@ -147,7 +152,7 @@ async function sendDailyWorldAnnouncements(guild) {
 🏆 Prize: **${reward ? `₹${reward.toLocaleString('en-IN')}` : 'Configured event rewards'}**
 ⏳ Ends: <t:${Math.floor(new Date(event.ends_at).getTime()/1000)}:F>
 
-Press **🎮 Open Event** to register and view the event.`, dailyButtonRows('event'));
+Press **🎮 Join Event** to enter. Use **🏆 Leaderboard** to see live rankings.`, eventButtonRows(event.id));
   }
 
   // Season: 15:00 IST
@@ -821,13 +826,114 @@ async function handleCommand(message) {
   return sendChampionshipDashboard(message);
 }
 
+async function getOpenEvent(guildId, eventId = null) {
+  let q = sb.from('events').select('*').eq('guild_id', guildId).eq('status', 'open');
+  if (eventId && eventId !== 'daily') q = q.eq('id', Number(eventId));
+  q = q.order('starts_at', { ascending: false }).limit(1).maybeSingle();
+  const r = await q;
+  if (r.error) throw r.error;
+  return r.data;
+}
+
+function eventProgressBar(score, max = 20) {
+  const n = Math.max(0, Number(score) || 0);
+  const filled = Math.min(10, Math.round((n / Math.max(1, max)) * 10));
+  return '▰'.repeat(filled) + '▱'.repeat(10 - filled);
+}
+
+async function eventEmbed(guildId, userId, event) {
+  if (!event) return new EmbedBuilder().setTitle('🎉 VEHICLE LIFE • EVENT').setDescription('❌ No active event is available right now.');
+  const entry = await sb.from('event_entries').select('score,joined_at').eq('event_id', event.id).eq('user_id', userId).maybeSingle();
+  if (entry.error) throw entry.error;
+  const score = Number(entry.data?.score || 0);
+  const joined = Boolean(entry.data);
+  const lb = await sb.from('event_entries').select('user_id,score').eq('event_id', event.id).order('score', { ascending: false }).order('joined_at', { ascending: true }).limit(100);
+  if (lb.error) throw lb.error;
+  const rows = lb.data || [];
+  const pos = joined ? rows.findIndex(x => String(x.user_id) === String(userId)) + 1 : null;
+  const reward = Number(event.rewards?.cash || 0);
+  const xp = Number(event.rewards?.xp || 0);
+  return new EmbedBuilder()
+    .setTitle(`🎉 ${event.name.toUpperCase()}`)
+    .setDescription(
+      `🏁 **Complete races and climb the live leaderboard.**\n\n` +
+      `🎟️ Entry: **${Number(event.entry_fee || 0) ? money(event.entry_fee) : 'FREE'}**\n` +
+      `🏆 Reward: **${reward ? money(reward) : 'Configured prize'}**${xp ? ` + **${xp} XP**` : ''}\n` +
+      `⏳ Ends: <t:${Math.floor(new Date(event.ends_at).getTime() / 1000)}:R>\n\n` +
+      `👤 **Your status:** ${joined ? `#${pos} • **${score} pts**` : 'Not joined'}\n` +
+      `${eventProgressBar(score)} ${score} pts\n\n` +
+      `📌 **Scoring**\n` +
+      `• PvP win: **+3 pts**\n` +
+      `• PvP loss: **+1 pt**\n` +
+      `• Solo race: **+1 pt**`
+    )
+    .addFields({ name: '📜 Event', value: event.description || 'Compete in Vehicle Life races.', inline: false })
+    .setFooter({ text: `Event #${event.id} • Live rankings update after races` })
+    .setTimestamp();
+}
+
+async function eventLeaderboardEmbed(guildId, userId, event) {
+  if (!event) return new EmbedBuilder().setTitle('🏆 EVENT LEADERBOARD').setDescription('❌ No active event is available right now.');
+  const r = await sb.from('event_entries').select('user_id,score,joined_at').eq('event_id', event.id).order('score', { ascending: false }).order('joined_at', { ascending: true }).limit(50);
+  if (r.error) throw r.error;
+  const rows = r.data || [];
+  const mine = rows.findIndex(x => String(x.user_id) === String(userId));
+  const lines = rows.slice(0, 10).map((x, i) => {
+    const medal = ['🥇', '🥈', '🥉'][i] || `**${i + 1}.**`;
+    return `${medal} <@${x.user_id}> — **${Number(x.score || 0)} pts**`;
+  });
+  if (mine >= 10) lines.push(`\n📍 **Your position:** #${mine + 1} • **${Number(rows[mine].score || 0)} pts**`);
+  return new EmbedBuilder()
+    .setTitle(`🏆 ${event.name.toUpperCase()} • LEADERBOARD`)
+    .setDescription(lines.join('\n') || 'No players have joined yet.\n\nBe the first to enter the event!')
+    .addFields(
+      { name: '👥 Players', value: `**${rows.length}**`, inline: true },
+      { name: '⏳ Ends', value: `<t:${Math.floor(new Date(event.ends_at).getTime() / 1000)}:R>`, inline: true },
+      { name: '🎯 Your Score', value: mine >= 0 ? `**${Number(rows[mine].score || 0)} pts** • #${mine + 1}` : '**Not joined**', inline: true }
+    )
+    .setFooter({ text: `Event #${event.id} • Top 10 shown` })
+    .setTimestamp();
+}
+
 async function handleButton(interaction) {
   if (!interaction.isButton()) return false;
   const id = String(interaction.customId || '');
-  if (!id.startsWith('champ:') && !id.startsWith('season:')) return false;
+  if (!id.startsWith('champ:') && !id.startsWith('season:') && !id.startsWith('event:')) return false;
 
   try {
     if (!interaction.guild) return interaction.reply({ content: '❌ This button only works inside a server.', ephemeral: true });
+
+    if (id.startsWith('event:')) {
+      const [, action, eventId] = id.split(':');
+      const event = await getOpenEvent(interaction.guild.id, eventId);
+      if (!event) return interaction.reply({ content: '❌ This event is no longer active.', ephemeral: true });
+
+      if (action === 'join') {
+        const existing = await sb.from('event_entries').select('id,score').eq('event_id', event.id).eq('user_id', interaction.user.id).maybeSingle();
+        if (existing.error) throw existing.error;
+        if (!existing.data) {
+          const fee = Number(event.entry_fee || 0);
+          if (fee > 0) await game.changeBalance(interaction.guild.id, interaction.user.id, -fee, 'event_entry', event.id, {}, false);
+          const ins = await sb.from('event_entries').insert({ event_id: event.id, guild_id: interaction.guild.id, user_id: interaction.user.id, score: 0, joined_at: new Date().toISOString() });
+          if (ins.error) {
+            if (fee > 0) await game.changeBalance(interaction.guild.id, interaction.user.id, fee, 'event_entry_refund', event.id, {}, false).catch(() => {});
+            if (String(ins.error.code || '') === '23505' || /duplicate/i.test(String(ins.error.message || ''))) {
+              return interaction.reply({ content: '✅ You are already in this event.', ephemeral: true });
+            }
+            throw ins.error;
+          }
+        }
+        return interaction.update({ embeds: [await eventEmbed(interaction.guild.id, interaction.user.id, event)], components: eventButtonRows(event.id) });
+      }
+
+      if (action === 'details') {
+        return interaction.reply({ embeds: [await eventEmbed(interaction.guild.id, interaction.user.id, event)], components: eventButtonRows(event.id), ephemeral: true });
+      }
+
+      if (action === 'leaderboard') {
+        return interaction.reply({ embeds: [await eventLeaderboardEmbed(interaction.guild.id, interaction.user.id, event)], components: eventButtonRows(event.id), ephemeral: true });
+      }
+    }
 
     if (id === 'champ:register') {
       if (!(await memberHasGarageRole(interaction.guild.id, interaction.member))) {

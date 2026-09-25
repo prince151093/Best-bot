@@ -893,25 +893,87 @@ async function handle(message) {
       const listing = await listMarketplace(gid, uid, v.id, price);
       const del = await sb.from('user_vehicles').delete().eq('id', o.id);
       if (del.error) {
-        await sb.from('marketplace').update({ status: 'cancelled', cancelled_at: new Date().toISOString() }).eq('id', listing.id).catch(() => {});
+        await sb.from('marketplace').update({ status: 'cancelled' }).eq('id', listing.id).catch(() => {});
         throw del.error;
       }
       return message.reply(`🛒 Listed **${v.name}** for **${money(price)}**. Listing ID: **${listing.id}**.`);
     }
     if (cmd === '?marketbuy') {
       const id = Number(args[0]);
-      if (!Number.isInteger(id)) return message.reply('❌ Use `?marketbuy <listing ID>`.');
-      const r = await sb.rpc('purchase_market_listing', { p_listing_id: id, p_buyer_id: uid });
-      if (r.error) {
-        const code = String(r.error.message || '');
-        if (code.includes('LISTING_NOT_FOUND')) return message.reply('❌ Listing not found or already sold.');
-        if (code.includes('INSUFFICIENT_FUNDS')) return message.reply('❌ Insufficient funds.');
-        if (code.includes('ALREADY_OWNED')) return message.reply('❌ You already own this vehicle.');
-        throw r.error;
-      }
-      const vehicleId = Number(r.data?.vehicle_id);
+      if (!Number.isInteger(id) || id <= 0) return message.reply('❌ Use `?marketbuy <listing ID>`.');
+
+      // Do not use the old purchase_market_listing RPC here. Older databases
+      // may still have that function referencing a removed `cancelled_at`
+      // column, which made every purchase fail. The flow below only uses the
+      // columns that the current marketplace table actually needs.
+      const listingR = await sb.from('marketplace')
+        .select('id,guild_id,seller_id,vehicle_id,price,status')
+        .eq('id', id)
+        .eq('guild_id', gid)
+        .eq('status', 'active')
+        .maybeSingle();
+      if (listingR.error) throw listingR.error;
+      const listing = listingR.data;
+      if (!listing) return message.reply('❌ Listing not found or already sold/cancelled.');
+      if (String(listing.seller_id) === String(uid)) return message.reply('❌ You cannot buy your own marketplace listing.');
+
+      const vehicleId = Number(listing.vehicle_id);
       const v = V[vehicleId - 1];
-      return message.reply(`✅ Bought **${v?.name || `Vehicle #${vehicleId}`}** for **${money(r.data?.price || 0)}**.`);
+      if (!v) return message.reply('❌ This listing references an invalid vehicle. Contact an administrator.');
+
+      const existing = await own(gid, uid, v);
+      if (existing) return message.reply('❌ You already own this vehicle.');
+
+      // Claim the listing first. This conditional update prevents two users
+      // from buying the same active listing at the same time.
+      const claimed = await sb.from('marketplace')
+        .update({ status: 'sold' })
+        .eq('id', id)
+        .eq('guild_id', gid)
+        .eq('status', 'active')
+        .select('id')
+        .maybeSingle();
+      if (claimed.error) throw claimed.error;
+      if (!claimed.data) return message.reply('❌ This listing was just purchased or cancelled by someone else.');
+
+      const price = Math.max(0, Math.floor(Number(listing.price) || 0));
+      let charged = false;
+      let addedVehicleId = null;
+      let sellerCredited = false;
+      try {
+        await changeBalance(gid, uid, -price, 'market_purchase', id, { listing_id: id, vehicle_id: vehicleId }, false);
+        charged = true;
+
+        const added = await sb.from('user_vehicles').insert({
+          guild_id: gid,
+          user_id: uid,
+          vehicle_id: vehicleId,
+          level: 1,
+          xp: 0,
+          condition: 100,
+          upgrades: {},
+          custom: {}
+        }).select().single();
+        if (added.error) {
+          if (/duplicate/i.test(String(added.error.message || ''))) throw new Error('ALREADY_OWNED');
+          throw added.error;
+        }
+        addedVehicleId = added.data?.id || null;
+
+        await changeBalance(gid, String(listing.seller_id), price, 'market_sale', id, { listing_id: id, vehicle_id: vehicleId, buyer_id: uid }, false);
+        sellerCredited = true;
+        await addDriverXp(gid, uid, 25);
+        return message.reply(`✅ Bought **${v.name}** for **${money(price)}**. Listing **#${id}** is now sold.`);
+      } catch (err) {
+        // Best-effort rollback. Never leave a listing permanently sold when
+        // the buyer could not receive the vehicle.
+        if (charged) await changeBalance(gid, uid, price, 'market_purchase_refund', id, { listing_id: id, vehicle_id: vehicleId }, false).catch(() => {});
+        if (sellerCredited) await changeBalance(gid, String(listing.seller_id), -price, 'market_sale_rollback', id, { listing_id: id, vehicle_id: vehicleId }, false).catch(() => {});
+        if (addedVehicleId) await sb.from('user_vehicles').delete().eq('id', addedVehicleId).catch(() => {});
+        await sb.from('marketplace').update({ status: 'active' }).eq('id', id).eq('guild_id', gid).eq('status', 'sold').catch(() => {});
+        if (err.message === 'ALREADY_OWNED') return message.reply('❌ You already own this vehicle.');
+        throw err;
+      }
     }
     if (cmd === '?marketcancel') {
       const listingId = Number(args[0]);
@@ -939,7 +1001,7 @@ async function handle(message) {
       const existing = await own(gid, uid, v);
       if (existing) {
         const cancelled = await sb.from('marketplace')
-          .update({ status: 'cancelled', cancelled_at: new Date().toISOString() })
+          .update({ status: 'cancelled' })
           .eq('id', listingId)
           .eq('guild_id', gid)
           .eq('seller_id', uid)
@@ -969,7 +1031,7 @@ async function handle(message) {
       }
 
       const cancelled = await sb.from('marketplace')
-        .update({ status: 'cancelled', cancelled_at: new Date().toISOString() })
+        .update({ status: 'cancelled' })
         .eq('id', listingId)
         .eq('guild_id', gid)
         .eq('seller_id', uid)
@@ -1053,7 +1115,31 @@ async function handle(message) {
       await ensureLiveWorld(gid);
       const r = await sb.from('events').select('*').eq('guild_id', gid).eq('status', 'open').order('starts_at');
       if (r.error) throw r.error;
-      return message.reply(r.data?.length ? r.data.map(e => `🎉 **#${e.id} ${e.name}**\n💰 Entry: ${money(e.entry_fee)}\n🕒 ${new Date(e.starts_at).toLocaleString('en-IN')} → ${new Date(e.ends_at).toLocaleString('en-IN')}\n${e.description}\nUse \`?eventjoin ${e.id}\``).join('\n\n') : 'No active events.');
+      if (!r.data?.length) return message.reply('🎉 **EVENT CENTER**\n\nNo active events right now.');
+      const event = r.data[0];
+      const entry = await sb.from('event_entries').select('score').eq('event_id', event.id).eq('user_id', uid).maybeSingle();
+      if (entry.error) throw entry.error;
+      const players = await sb.from('event_entries').select('id', { count: 'exact', head: true }).eq('event_id', event.id);
+      if (players.error) throw players.error;
+      const reward = Number(event.rewards?.cash || 0);
+      const embed = new EmbedBuilder()
+        .setTitle(`🎉 EVENT CENTER • ${event.name.toUpperCase()}`)
+        .setDescription(`🏁 **Complete races and climb the live leaderboard.**\n\n${event.description || 'Compete in Vehicle Life races.'}`)
+        .addFields(
+          { name: '🎟️ Entry', value: Number(event.entry_fee || 0) ? money(event.entry_fee) : 'FREE', inline: true },
+          { name: '🏆 Prize', value: reward ? money(reward) : 'Configured', inline: true },
+          { name: '👥 Drivers', value: `**${players.count || 0}**`, inline: true },
+          { name: '⏳ Ends', value: `<t:${Math.floor(new Date(event.ends_at).getTime() / 1000)}:R>`, inline: true },
+          { name: '👤 Your Score', value: entry.data ? `**${Number(entry.data.score || 0)} pts**` : '**Not joined**', inline: true }
+        )
+        .setFooter({ text: `Event #${event.id} • Use the buttons below` })
+        .setTimestamp();
+      const rows = [new ActionRowBuilder().addComponents(
+        new ButtonBuilder().setCustomId(`event:join:${event.id}`).setLabel('🎮 Join Event').setStyle(ButtonStyle.Success),
+        new ButtonBuilder().setCustomId(`event:details:${event.id}`).setLabel('ℹ️ Details').setStyle(ButtonStyle.Primary),
+        new ButtonBuilder().setCustomId(`event:leaderboard:${event.id}`).setLabel('🏆 Leaderboard').setStyle(ButtonStyle.Secondary)
+      )];
+      return message.reply({ embeds: [embed], components: rows });
     }
     if (cmd === '?eventjoin') {
       const eventId = Number(args[0]);
@@ -1115,7 +1201,7 @@ async function handle(message) {
       if (supplied !== RESET_PASSWORD) return message.channel.send('❌ Invalid admin reset password.');
       if (!message.member.permissions.has('ManageGuild')) return message.channel.send('❌ Manage Server required.');
       const resetUser = async (userId) => {
-        await sb.from('marketplace').update({ status: 'cancelled', cancelled_at: new Date().toISOString() }).eq('guild_id', gid).eq('seller_id', userId).eq('status', 'active');
+        await sb.from('marketplace').update({ status: 'cancelled' }).eq('guild_id', gid).eq('seller_id', userId).eq('status', 'active');
         const dv = await sb.from('user_vehicles').delete().eq('guild_id', gid).eq('user_id', userId);
         if (dv.error) throw dv.error;
         const payload = { balance: 0, driver_xp: 0, driver_level: 1, active_vehicle_id: null, race_vehicle_id: null, daily_streak: 0, daily_claimed_on: null, season_xp: 0, updated_at: new Date().toISOString() };
@@ -1212,8 +1298,33 @@ async function handleButton(interaction) {
       }
       if (action === 'events') {
         await ensureLiveWorld(gid);
-        const r = await sb.from('events').select('*').eq('guild_id',gid).eq('status','open').order('starts_at'); if (r.error) throw r.error;
-        return interaction.editReply({ content: r.data?.length ? r.data.map(e => `🎉 **#${e.id} ${e.name}** • 🕒 ${new Date(e.starts_at).toLocaleString('en-IN')} → ${new Date(e.ends_at).toLocaleString('en-IN')}\n💰 Entry: ${money(e.entry_fee)}\n${e.description}`).join('\n\n') : 'No active events.', embeds: [], components: mainMenuRows() });
+        const r = await sb.from('events').select('*').eq('guild_id', gid).eq('status', 'open').order('starts_at');
+        if (r.error) throw r.error;
+        if (!r.data?.length) return interaction.editReply({ content: '🎉 **EVENT CENTER**\n\nNo active events right now.', embeds: [], components: mainMenuRows() });
+        const event = r.data[0];
+        const entry = await sb.from('event_entries').select('score').eq('event_id', event.id).eq('user_id', uid).maybeSingle();
+        if (entry.error) throw entry.error;
+        const players = await sb.from('event_entries').select('id', { count: 'exact', head: true }).eq('event_id', event.id);
+        if (players.error) throw players.error;
+        const reward = Number(event.rewards?.cash || 0);
+        const embed = new EmbedBuilder()
+          .setTitle(`🎉 EVENT CENTER • ${event.name.toUpperCase()}`)
+          .setDescription(`🏁 **Complete races and climb the live leaderboard.**\n\n${event.description || 'Compete in Vehicle Life races.'}`)
+          .addFields(
+            { name: '🎟️ Entry', value: Number(event.entry_fee || 0) ? money(event.entry_fee) : 'FREE', inline: true },
+            { name: '🏆 Prize', value: reward ? money(reward) : 'Configured', inline: true },
+            { name: '👥 Drivers', value: `**${players.count || 0}**`, inline: true },
+            { name: '⏳ Ends', value: `<t:${Math.floor(new Date(event.ends_at).getTime() / 1000)}:R>`, inline: true },
+            { name: '👤 Your Score', value: entry.data ? `**${Number(entry.data.score || 0)} pts**` : '**Not joined**', inline: true }
+          )
+          .setFooter({ text: `Event #${event.id} • Live leaderboard available below` })
+          .setTimestamp();
+        const eventRows = [new ActionRowBuilder().addComponents(
+          new ButtonBuilder().setCustomId(`event:join:${event.id}`).setLabel('🎮 Join Event').setStyle(ButtonStyle.Success),
+          new ButtonBuilder().setCustomId(`event:details:${event.id}`).setLabel('ℹ️ Details').setStyle(ButtonStyle.Primary),
+          new ButtonBuilder().setCustomId(`event:leaderboard:${event.id}`).setLabel('🏆 Leaderboard').setStyle(ButtonStyle.Secondary)
+        )];
+        return interaction.editReply({ content: '', embeds: [embed], components: eventRows });
       }
       if (action === 'race') {
         return interaction.editReply({ content: '🏁 **Racing**\nUse the challenge command `?race @user`, then the challenged player receives the Accept/Decline buttons privately.\n\nYou can also use `?betrace <amount> @user` for a money race.', embeds: [], components: mainMenuRows() });
