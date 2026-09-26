@@ -6,7 +6,7 @@ const {
 } = require('discord.js');
 const config = require('./config');
 const game = require('./game');
-const { racerRoleMention, ensureRacerRole, memberHasGarageRole } = require('./server-settings');
+const { garageRoleMention, memberHasGarageRole } = require('./server-settings');
 
 const sb = require('@supabase/supabase-js').createClient(config.supabaseUrl, config.supabaseServiceRoleKey, {
   auth: { persistSession: false, autoRefreshToken: false }
@@ -28,26 +28,16 @@ function money(amount) {
 }
 
 function randomEventPrizes() {
-  const pools = [
-    [100000, 70000, 40000],
-    [90000, 60000, 30000],
-    [80000, 50000, 30000],
-    [70000, 40000, 20000],
-    [60000, 30000, 20000]
-  ];
+  const pools = [[250000,150000,100000],[150000,100000,50000],[200000,120000,70000],[300000,150000,75000],[180000,110000,60000]];
   return pools[Math.floor(Math.random() * pools.length)];
 }
 
-function eventPrizes(event) {
-  const prizes = Array.isArray(event?.rewards?.prizes) ? event.rewards.prizes.slice(0, 3).map(x => Math.max(0, Math.floor(Number(x) || 0))) : [];
-  return prizes.length >= 3 ? prizes : randomEventPrizes();
+function eventPrizes(rewards) {
+  if (Array.isArray(rewards?.prizes)) return rewards.prizes.map(Number).slice(0,3);
+  const cash = Number(rewards?.cash || 0);
+  return cash ? [cash, Math.floor(cash*0.6), Math.floor(cash*0.4)] : [0,0,0];
 }
 
-function prizeText(event) {
-  const [p1, p2, p3] = eventPrizes(event);
-  const total = p1 + p2 + p3;
-  return `🥇 ${money(p1)} • 🥈 ${money(p2)} • 🥉 ${money(p3)}\n💰 Total Prize Pool: **${money(total)}**`;
-}
 
 function isoAtDay(base, dayOffset, hour) {
   const d = new Date(base.getTime() + dayOffset * DAY_MS);
@@ -93,7 +83,7 @@ async function competitionChannel(guild) {
 async function announce(guild, title, description, components = []) {
   const channel = await competitionChannel(guild);
   if (!channel) return;
-  const roleMention = await racerRoleMention(guild).catch(() => '');
+  const roleMention = await garageRoleMention(guild.id).catch(() => '');
   await channel.send({
     content: roleMention || undefined,
     allowedMentions: roleMention ? { roles: [roleMention.match(/\d+/)?.[0]] } : { parse: [] },
@@ -146,12 +136,12 @@ async function sendClosedEventAnnouncements(guild) {
     const lb = await sb.from('event_entries').select('user_id,score').eq('event_id', event.id).order('score', { ascending: false }).limit(3);
     if (lb.error) throw lb.error;
     const rows = lb.data || [];
-    const xp = Number(event.rewards?.xp || 150);
-    const prizes = eventPrizes(event);
+    const prizes = eventPrizes(event.rewards);
+    const xp = Number(event.rewards?.xp || 0);
     const podium = rows.length
-      ? rows.map((x, i) => `${['🥇','🥈','🥉'][i] || `#${i+1}`} <@${x.user_id}> — **${Number(x.score || 0)} pts** — **${money(prizes[i] || 0)}**`).join('\n')
+      ? rows.map((x, i) => `${['🥇','🥈','🥉'][i] || `#${i+1}`} <@${x.user_id}> — **${Number(x.score || 0)} pts**`).join('\n')
       : 'No players registered.';
-    await announce(guild, `🏁 EVENT COMPLETE — ${event.name}`, `${podium}\n\n🎁 **Final Prize Pool**\n${prizeText(event)}${xp ? `\n⭐ 1st place also receives **${xp} XP**` : ''}`);
+    await announce(guild, `🏁 EVENT COMPLETE — ${event.name}`, `${podium}\n\n💰 Prize Pool: **${money(prizes.reduce((a,b)=>a+b,0))}**\n🥇 **${money(prizes[0])}**\n🥈 **${money(prizes[1])}**\n🥉 **${money(prizes[2])}**${xp ? `\n⭐ + **${xp} XP** to podium finishers` : ''}`);
   }
 }
 
@@ -170,19 +160,15 @@ async function sendDailyWorldAnnouncements(guild) {
     if (!event) {
       const starts = new Date();
       const ends = new Date(starts.getTime() + DAY_MS);
-      const rewards = { prizes: randomEventPrizes(), xp: 150 };
-      const ins = await sb.from('events').insert({ guild_id:guild.id, name:'Daily Sprint', description:'Complete PvP races during the event and climb the leaderboard. Free entry.', entry_fee:0, status:'open', starts_at:starts.toISOString(), ends_at:ends.toISOString(), rewards }).select().single();
+      const ins = await sb.from('events').insert({ guild_id:guild.id, name:'Daily Sprint', description:'Complete PvP races during the event and climb the leaderboard. Free entry.', entry_fee:0, status:'open', starts_at:starts.toISOString(), ends_at:ends.toISOString(), rewards:{prizes: randomEventPrizes(),xp:250} }).select().single();
       if (ins.error) throw ins.error;
       event = ins.data;
-    } else if (!Array.isArray(event.rewards?.prizes) || event.rewards.prizes.length < 3) {
-      const rewards = { prizes: randomEventPrizes(), xp: Number(event.rewards?.xp || 150) };
-      const up = await sb.from('events').update({ rewards }).eq('id', event.id).select().single();
-      if (!up.error && up.data) event = up.data;
     }
+    const prizes = eventPrizes(event.rewards);
     await announce(guild, '🎉 DAILY EVENT IS LIVE', `**${event.name}**
 
 🎟️ Entry: **FREE**
-🏆 **Prize Pool**\n${prizeText(event)}
+💰 Prize Pool: **₹${prizes.reduce((a,b)=>a+b,0).toLocaleString('en-IN')}**\n🥇 **${money(prizes[0])}**\n🥈 **${money(prizes[1])}**\n🥉 **${money(prizes[2])}**
 ⏳ Ends: <t:${Math.floor(new Date(event.ends_at).getTime()/1000)}:F>
 
 Press **🎮 Join Event** to enter. Use **🏆 Leaderboard** to see live rankings.`, eventButtonRows(event.id));
@@ -214,7 +200,7 @@ The Season progression continues today. Use the buttons to view your stats, lead
 
 👥 Registered: **${registered}/48**
 🏁 Format: **48 → 36 → 24 → 12 → 3**
-💰 Prizes: **₹300,000 / ₹200,000 / ₹100,000**
+💰 Prizes: **₹1,000,000 / ₹600,000 / ₹350,000**
 
 Only members with the configured Garage Role can register.`, dailyButtonRows('champ'));
       } else if (champ?.status === 'active') {
@@ -411,7 +397,7 @@ async function scheduleDay(guild, champ, dayNo) {
   const channel = await competitionChannel(guild);
   if (!channel) return;
 
-  const roleMention = await racerRoleMention(guild).catch(() => '');
+  const roleMention = await garageRoleMention(guild.id).catch(() => '');
   await channel.send({
     content: roleMention || undefined,
     allowedMentions: roleMention ? { roles: [roleMention.match(/\d+/)?.[0]] } : { parse: [] },
@@ -492,7 +478,7 @@ async function finishStage(guild, champ) {
     await sb.from('championship_players').update({ eliminated: true }).in('id', rows.slice(3).map(x => x.id));
   }
 
-  const prizes = [300000, 200000, 100000];
+  const prizes = [1000000, 600000, 350000];
   for (let i = 0; i < top.length; i++) {
     const r = top[i];
     await sb.from('championship_players').update({ final_position: i + 1, final_prize: prizes[i] }).eq('id', r.id);
@@ -763,7 +749,7 @@ async function championshipDashboard(guildId, userId) {
           ? `👤 **Your position:** #${position}\n📊 **${mine.points} pts** • ${mine.wins}W / ${mine.losses}L\n🏁 ${mine.races} races\n\n`
           : '❌ You are not a Championship player.\n\n') +
         `🏁 **48 → 36 → 24 → 12 → 3**\n` +
-        `💰 🥇 ₹300,000 • 🥈 ₹200,000 • 🥉 ₹100,000`
+        `💰 🥇 ₹1,000,000 • 🥈 ₹600,000 • 🥉 ₹350,000`
       )
       .setFooter({ text: `Season ${season.season_no} • Championship ends in ${remainingText(champ.ends_at)}` })
   };
@@ -806,7 +792,7 @@ async function seasonDashboard(guildId, userId, section = 'overview') {
     return {
       embed: new EmbedBuilder().setTitle(`🎁 ${season.name} • SEASON REWARDS`).setDescription(
         `Season progression is based on **Season XP**.\n\n` +
-        `⭐ Level 5 — milestone\n⭐ Level 10 — milestone\n⭐ Level 20 — milestone\n⭐ Level 30 — milestone\n\n` +
+        `⭐ Level 5 — **₹10,000**\n⭐ Level 10 — **₹20,000**\n⭐ Level 15 — **₹30,000**\n⭐ Level 20 — **₹50,000**\n⭐ Level 25 — **₹75,000**\n⭐ Level 30 — **₹100,000**\n\n` +
         `Use **My Stats** to track your Season XP and level.`
       )
     };
@@ -854,8 +840,6 @@ async function sendSeasonDashboard(message) {
 async function handleCommand(message) {
   const cmd = String(message.content || '').trim().split(/\s+/)[0]?.toLowerCase();
   if (!['?championship', '?champ', '?season'].includes(cmd)) return false;
-  await ensureRacerRole(message.member).catch(() => null);
-  await game.syncPlayerProgression(message.guild.id, message.author.id);
 
   if (cmd === '?season') return sendSeasonDashboard(message);
   return sendChampionshipDashboard(message);
@@ -886,15 +870,15 @@ async function eventEmbed(guildId, userId, event) {
   if (lb.error) throw lb.error;
   const rows = lb.data || [];
   const pos = joined ? rows.findIndex(x => String(x.user_id) === String(userId)) + 1 : null;
-  const prizes = eventPrizes(event);
-  const xp = Number(event.rewards?.xp || 150);
+  const prizes = eventPrizes(event.rewards);
+  const reward = prizes.reduce((a,b)=>a+b,0);
+  const xp = Number(event.rewards?.xp || 0);
   return new EmbedBuilder()
     .setTitle(`🎉 ${event.name.toUpperCase()}`)
     .setDescription(
       `🏁 **Complete races and climb the live leaderboard.**\n\n` +
       `🎟️ Entry: **${Number(event.entry_fee || 0) ? money(event.entry_fee) : 'FREE'}**\n` +
-      `🏆 **Prize Pool:** 🥇 ${money(prizes[0])} • 🥈 ${money(prizes[1])} • 🥉 ${money(prizes[2])}\n` +
-      `💰 **Total:** ${money(prizes.reduce((a, b) => a + b, 0))}${xp ? ` • ⭐ 1st: +${xp} XP` : ''}\n` +
+      `💰 Prize Pool: **${reward ? money(reward) : 'Configured prize'}**\n🥇 **${money(prizes[0])}** • 🥈 **${money(prizes[1])}** • 🥉 **${money(prizes[2])}**${xp ? `\n⭐ + **${xp} XP**` : ''}\n` +
       `⏳ Ends: <t:${Math.floor(new Date(event.ends_at).getTime() / 1000)}:R>\n\n` +
       `👤 **Your status:** ${joined ? `#${pos} • **${score} pts**` : 'Not joined'}\n` +
       `${eventProgressBar(score)} ${score} pts\n\n` +
@@ -938,8 +922,6 @@ async function handleButton(interaction) {
 
   try {
     if (!interaction.guild) return interaction.reply({ content: '❌ This button only works inside a server.', ephemeral: true });
-    await ensureRacerRole(interaction.member).catch(() => null);
-    await game.syncPlayerProgression(interaction.guild.id, interaction.user.id);
 
     if (id.startsWith('event:')) {
       const [, action, eventId] = id.split(':');

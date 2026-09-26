@@ -4,7 +4,7 @@ const path = require('path');
 const config = require('./config');
 const { vehicles } = require('./vehicles');
 const { getUser, setVehicleIndex, resetUserProgress } = require('./db');
-const { ensureRacerRole } = require('./server-settings');
+const { getGarageRoleId } = require('./server-settings');
 
 const sb = createClient(config.supabaseUrl, config.supabaseServiceRoleKey, {
   auth: { persistSession: false, autoRefreshToken: false }
@@ -21,11 +21,11 @@ const CLASSES = ['D', 'C', 'B', 'A', 'S', 'S+', 'X'];
 const UPGRADE_TYPES = ['engine', 'turbo', 'ecu', 'transmission', 'suspension', 'brakes', 'tires', 'weight'];
 
 const MISSION_DEFS = [
-  ['races', 'Complete 5 races', 5, 50000],
-  ['wins', 'Win 3 races', 3, 75000],
-  ['earn', 'Earn ₹50000', 50000, 60000],
-  ['upgrade', 'Upgrade a vehicle', 1, 30000],
-  ['rare', 'Use a Rare+ vehicle', 1, 40000]
+  ['races', 'Complete 5 races', 5, 20000],
+  ['wins', 'Win 3 races', 3, 30000],
+  ['earn', 'Earn ₹50000', 50000, 25000],
+  ['upgrade', 'Upgrade a vehicle', 1, 15000],
+  ['rare', 'Use a Rare+ vehicle', 1, 25000]
 ];
 
 const ACHIEVEMENTS = {
@@ -44,14 +44,14 @@ const ACHIEVEMENTS = {
 };
 
 const UPGRADES = {
-  engine:       { label: 'Engine', power: 5, speed: 2, accel: 1, launch: 1 },
-  turbo:        { label: 'Turbo', power: 2, accel: 3 },
-  ecu:          { label: 'ECU', power: 1 },
-  transmission: { label: 'Transmission', speed: 2, accel: 1, launch: 1 },
-  suspension:   { label: 'Suspension', handling: 2 },
-  brakes:       { label: 'Brakes', braking: 2 },
-  tires:        { label: 'Tires', handling: 1, braking: 2 },
-  weight:       { label: 'Weight Reduction', weight: -20, accel: 1, handling: 1 }
+  engine:       { label: 'Engine', power: 5, speed: 2, accel: 5, launch: 3 },
+  turbo:        { label: 'Turbo', power: 2, accel: 5 },
+  ecu:          { label: 'ECU', power: 2, accel: 2 },
+  transmission: { label: 'Transmission', speed: 3, accel: 2, launch: 2 },
+  suspension:   { label: 'Suspension', handling: 3 },
+  brakes:       { label: 'Brakes', braking: 3 },
+  tires:        { label: 'Performance Tires', handling: 2, braking: 2 },
+  weight:       { label: 'Weight Reduction', weight: -20, accel: 3, handling: 2 }
 };
 
 function meta(v) {
@@ -66,7 +66,16 @@ function meta(v) {
   const weight = Math.max(850, 1900 - i * 7);
   const launch = 35 + ((i * 11) % 60);
   const performance = Math.round((power / 3 + topSpeed / 3 + acceleration + handling + braking + launch) / 4);
-  const price = Math.round((15000 * Math.pow(1.075, i - 1)) / 1000) * 1000;
+  const PRICE_TIERS = [[1,0],[5,50000],[20,500000],[40,2500000],[60,10000000],[80,30000000],[100,75000000],[110,150000000],[114,250000000],[115,350000000]];
+  let price = 350000000;
+  for (let t = 0; t < PRICE_TIERS.length - 1; t++) {
+    const [aId, aPrice] = PRICE_TIERS[t], [bId, bPrice] = PRICE_TIERS[t + 1];
+    if (i >= aId && i <= bId) {
+      const ratio = (i - aId) / Math.max(1, bId - aId);
+      price = Math.round((aPrice + (bPrice - aPrice) * ratio) / 1000) * 1000;
+      break;
+    }
+  }
   return { ...v, rarity, class: cls, power, topSpeed, acceleration, handling, braking, weight, launch, performance, price };
 }
 
@@ -74,6 +83,24 @@ const V = vehicles.map(meta);
 
 function money(n) {
   return `₹${Math.max(0, Math.floor(Number(n) || 0)).toLocaleString('en-IN')}`;
+}
+
+async function ensureRacerRole(member) {
+  try {
+    if (!member?.guild || !member.manageable) return;
+    let role = null;
+    const configured = await getGarageRoleId(member.guild.id).catch(() => null);
+    if (configured) role = member.guild.roles.cache.get(String(configured)) || await member.guild.roles.fetch(String(configured)).catch(() => null);
+    if (!role) role = member.guild.roles.cache.find(r => ['racers🏎️','racers🏎','racers'].includes(r.name.toLowerCase()));
+    if (role && !member.roles.cache.has(role.id) && role.editable) await member.roles.add(role, 'Vehicle Life player');
+  } catch (e) { console.error('Racer role assignment failed:', e.message || e); }
+}
+
+function eventPrizes(rewards) {
+  const r = rewards || {};
+  if (Array.isArray(r.prizes)) return r.prizes.map(Number).slice(0,3);
+  const cash = Number(r.cash || 0);
+  return cash ? [cash, Math.floor(cash * 0.6), Math.floor(cash * 0.4)] : [0,0,0];
 }
 function levelForXp(xp) { return Math.max(1, Math.floor(Math.sqrt(Math.max(0, Number(xp) || 0) / 100)) + 1); }
 function todayKey() {
@@ -116,7 +143,7 @@ async function profile(guildId, userId) {
     const row = {
       guild_id: guildId,
       user_id: userId,
-      balance: 100000,
+      balance: 50000,
       driver_xp: 0,
       driver_level: 1,
       daily_streak: 0,
@@ -281,64 +308,13 @@ function progressionIndex(guildId, userId) {
   return Math.max(0, Math.min(Number(u?.vehicle_index || 0), V.length));
 }
 
-async function syncPlayerProgression(guildId, userId) {
-  const activity = getUser(userId, guildId);
-  let owned = await vehiclesOf(guildId, userId);
-  const ownedIds = new Set(owned.map(row => Number(row.vehicle_id)));
-
-  // Every player gets the starter vehicle immediately when they first use Vehicle Life.
-  // Later vehicles still follow the designed cumulative VC/message requirements.
-  if (!ownedIds.has(1)) {
-    await grantProgressionVehicle(guildId, userId, 1);
-    ownedIds.add(1);
-    owned = await vehiclesOf(guildId, userId);
-  }
-
-  let current = 0;
-  while (current < V.length && ownedIds.has(current + 1)) current++;
-  if (current > Number(activity.vehicle_index || 0)) {
-    await setVehicleIndex(userId, guildId, current);
-  }
-
-  // Unlock as many sequential vehicles as the player's current activity qualifies for.
-  for (let id = current + 1; id <= V.length; id++) {
-    const next = V[id - 1];
-    const vcHours = Number(activity.vc_seconds || 0) / 3600;
-    const messages = Number(activity.messages || 0);
-    if (vcHours < Number(next.vcHours || 0) || messages < Number(next.messages || 0)) break;
-    await grantProgressionVehicle(guildId, userId, id);
-    await setVehicleIndex(userId, guildId, id);
-  }
-
-  return { activity: getUser(userId, guildId), owned: await vehiclesOf(guildId, userId) };
-}
-
-function randomEventPrizes() {
-  const pools = [
-    [100000, 70000, 40000], // total 210k
-    [90000, 60000, 30000],  // total 180k
-    [80000, 50000, 30000],  // total 160k
-    [70000, 40000, 20000],  // total 130k
-    [60000, 30000, 20000]   // total 110k
-  ];
-  return pools[Math.floor(Math.random() * pools.length)];
-}
-
-function normalizeEventRewards(rewards) {
-  const current = safeJson(rewards);
-  if (Array.isArray(current.prizes) && current.prizes.length >= 3) {
-    return { ...current, prizes: current.prizes.slice(0, 3).map(x => Math.max(0, Math.floor(Number(x) || 0))) };
-  }
-  return { prizes: randomEventPrizes(), xp: Number(current.xp || 150) };
-}
-
 async function buy(guild, member, arg) {
   const v = findVehicle(arg);
   if (!v) return '❌ Vehicle not found. Use `?dealership` or `?buy <vehicle number/name>`.';
-  // Vehicles can be purchased directly with in-game cash even if progression
-  // has not unlocked them yet. Progression still controls progression rewards.
   const p = await profile(guild.id, member.id);
+  const ownedCount = (await vehiclesOf(guild.id, member.id)).length;
   if (await own(guild.id, member.id, v)) return `❌ You already own **${v.name}**.`;
+  if (v.id > ownedCount + 1) return `🔒 **${v.name}** is locked. Own **${v.id - 1} vehicles** first to unlock it.`;
   if (Number(p.balance) < v.price) return `❌ You need ${money(v.price)} but have ${money(p.balance)}.`;
   await changeBalance(guild.id, member.id, -v.price, 'vehicle_purchase', v.id, { vehicle: v.name }, false);
   const r = await sb.from('user_vehicles').insert({ guild_id: guild.id, user_id: member.id, vehicle_id: v.id, level: 1, xp: 0, condition: 100, upgrades: {}, custom: {} }).select().single();
@@ -431,17 +407,18 @@ async function settleClosedEvents(guildId) {
   for (const e of r.data || []) {
     const entries = await sb.from('event_entries').select('*').eq('event_id', e.id).order('score', { ascending: false }).order('joined_at', { ascending: true }).limit(3);
     if (entries.error) throw entries.error;
-    const prizes = normalizeEventRewards(e.rewards).prizes;
-    const xp = Number(e.rewards?.xp || 150);
-    for (let i = 0; i < Math.min(3, (entries.data || []).length); i++) {
-      const entry = entries.data[i];
-      if (entry.rewarded) continue;
-      const cash = Number(prizes[i] || 0);
-      if (cash > 0) await changeBalance(guildId, entry.user_id, cash, 'event_reward', e.id, { event: e.name, position: i + 1 }, false);
-      if (i === 0 && xp > 0) { await addDriverXp(guildId, entry.user_id, xp); await addSeasonXp(guildId, entry.user_id, xp); }
-      await sb.from('event_entries').update({ rewarded: true }).eq('id', entry.id);
+    const rows = entries.data || [];
+    const prizes = eventPrizes(e.rewards);
+    const xp = Number(e.rewards?.xp || 0);
+    for (let i = 0; i < rows.length && i < 3; i++) {
+      const row = rows[i];
+      if (row.rewarded) continue;
+      const prize = Number(prizes[i] || 0);
+      if (prize > 0) await changeBalance(guildId, row.user_id, prize, 'event_reward', e.id, { event: e.name, position: i + 1 }, false);
+      if (xp > 0) { await addDriverXp(guildId, row.user_id, xp); await addSeasonXp(guildId, row.user_id, xp); }
+      await sb.from('event_entries').update({ rewarded: true }).eq('id', row.id);
     }
-    await sb.from('events').update({ status: 'closed', rewarded: true, rewards: { ...normalizeEventRewards(e.rewards), prizes } }).eq('id', e.id);
+    await sb.from('events').update({ status: 'closed', rewarded: true }).eq('id', e.id);
   }
 }
 
@@ -457,11 +434,14 @@ async function runRace(guild, member, type = 'race', opponentMember = null, opti
 
   if (!opponentMember) {
     const score = raceScore(av, a, type);
-    const time = Math.max(8, 70 - score / 10 + Math.random() * 2);
-    const condition = Math.max(0, a.condition - (type === 'time' ? 1 : 2));
+    const distanceKm = Number(options.distanceKm || 1);
+    const targetSeconds = Number(options.targetSeconds || 60);
+    const avgKmh = Math.max(35, Math.min(260, 55 + score * 0.55));
+    const time = Math.max(5, (distanceKm / avgKmh) * 3600 * (1 + Math.random() * 0.08 - 0.04));
+    const condition = Math.max(0, a.condition - (type === 'time' || type === 'solo' ? 1 : 2));
     await sb.from('user_vehicles').update({ condition }).eq('id', a.id);
     // Race winner reward = 1% of the winning vehicle's purchase price.
-    const reward = Math.max(1, Math.floor(av.price * 0.01));
+    const reward = Math.max(1000, Math.floor(options.soloReward || Math.min(100000, Math.max(10000, av.price * 0.001))));
     await changeBalance(guild.id, member.id, reward, 'race_reward', type, { vehicle: av.id });
     await addDriverXp(guild.id, member.id, 50);
     await addVehicleXp(guild.id, member.id, av.id, 25);
@@ -472,7 +452,7 @@ async function runRace(guild, member, type = 'race', opponentMember = null, opti
     await addSeasonXp(guild.id, member.id, 50);
     await recordEventScore(guild.id, member.id, 1);
     await checkAchievements(guild.id, member.id);
-    return { winnerId: member.id, timeA: time, reward, vehicleA: av, solo: true };
+    return { winnerId: member.id, timeA: time, reward, vehicleA: av, solo: true, distanceKm, targetSeconds, avgSpeed: distanceKm / (time / 3600) };
   }
 
   const op = await profile(guild.id, opponentMember.id);
@@ -497,7 +477,7 @@ async function runRace(guild, member, type = 'race', opponentMember = null, opti
   await sb.from('user_vehicles').update({ condition: Math.max(0, b.condition - (winnerIsA ? 4 : 2)) }).eq('id', b.id);
   if (!options.noRewards) {
     // Race winner reward = 1% of the winning vehicle's purchase price.
-    const reward = Math.max(1, Math.floor(winnerVehicle.price * 0.01));
+    const reward = Math.max(10000, Math.min(100000, Math.floor(winnerVehicle.price * 0.001)));
     await changeBalance(guild.id, winner.id, reward, 'race_reward', type, { vehicle: winnerVehicle.id });
     await addDriverXp(guild.id, winner.id, 100);
     await addDriverXp(guild.id, loser.id, 25);
@@ -527,7 +507,7 @@ async function runRace(guild, member, type = 'race', opponentMember = null, opti
 
 function raceText(type, result, rewardText = '') {
   if (result.error) return result.error;
-  if (result.solo) return `🏁 **${type.toUpperCase()} COMPLETE**\n🚗 ${result.vehicleA.emoji} **${result.vehicleA.name}**\n⏱️ Time: **${result.timeA.toFixed(2)}s**\n💰 Reward: **${money(result.reward)}**\n🧑‍✈️ +50 Driver XP\n🛠️ Condition reduced by race wear.${rewardText}`;
+  if (result.solo) return `🏁 **${type.toUpperCase()} COMPLETE**\n🚗 ${result.vehicleA.emoji} **${result.vehicleA.name}**\n📏 Distance: **${Number(result.distanceKm || 1)} KM**\n⏱️ Time: **${result.timeA.toFixed(2)}s**\n🎯 Target: **${Number(result.targetSeconds || 60).toFixed(0)}s**\n💨 Average Speed: **${result.avgSpeed ? result.avgSpeed.toFixed(1) : '—'} km/h**\n💰 Reward: **${money(result.reward)}**\n🧑‍✈️ +50 Driver XP\n🛠️ Condition reduced by race wear.${rewardText}`;
   return `🏁 **${type.toUpperCase()}**\n${result.vehicleA.emoji} **${result.vehicleA.name}** vs ${result.vehicleB.emoji} **${result.vehicleB.name}**\n🏆 Winner: <@${result.winnerId}>\n⏱️ ${result.timeA.toFixed(2)}s vs ${result.timeB.toFixed(2)}s${rewardText}`;
 }
 
@@ -559,6 +539,11 @@ async function topGarages(guildId, limit = 10) {
   return all.slice(0, limit);
 }
 
+function randomEventPrizes() {
+  const pools = [[250000,150000,100000],[150000,100000,50000],[200000,120000,70000],[300000,150000,75000],[180000,110000,60000]];
+  return pools[Math.floor(Math.random() * pools.length)];
+}
+
 async function ensureLiveWorld(guildId) {
   const now = new Date();
   let seasonR = await sb.from('seasons').select('*').eq('guild_id', guildId).eq('active', true).order('season_no', { ascending: false }).limit(1).maybeSingle();
@@ -575,22 +560,12 @@ async function ensureLiveWorld(guildId) {
     if (ins.error) throw ins.error;
     season = ins.data;
   }
-  const open = await sb.from('events').select('*').eq('guild_id', guildId).eq('status', 'open');
+  const open = await sb.from('events').select('id').eq('guild_id', guildId).eq('status', 'open');
   if (open.error) throw open.error;
   if (!open.data?.length) {
     const ends = new Date(now.getTime() + 24 * 3600000).toISOString();
-    const rewards = { prizes: randomEventPrizes(), xp: 150 };
-    const ins = await sb.from('events').insert({ guild_id: guildId, name: 'Daily Sprint', description: 'Complete PvP races during the event and climb the leaderboard. Free entry.', entry_fee: 0, status: 'open', starts_at: now.toISOString(), ends_at: ends, rewards });
+    const ins = await sb.from('events').insert({ guild_id: guildId, name: 'Daily Sprint', description: 'Complete races during the event and earn a bonus.', entry_fee: 0, status: 'open', starts_at: now.toISOString(), ends_at: ends, rewards: { prizes: randomEventPrizes(), xp: 250 } });
     if (ins.error) throw ins.error;
-  } else {
-    for (const event of open.data) {
-      const rewards = normalizeEventRewards(event.rewards);
-      const existing = Array.isArray(event.rewards?.prizes) ? event.rewards.prizes.slice(0, 3).map(Number) : [];
-      if (existing.length < 3 || existing.some((n, i) => n !== rewards.prizes[i])) {
-        const up = await sb.from('events').update({ rewards }).eq('id', event.id);
-        if (up.error) throw up.error;
-      }
-    }
   }
   return season;
 }
@@ -608,19 +583,14 @@ async function startAutomation(client) {
 }
 
 function profileEmbed(member, p, owned, best) {
-  const activity = getUser(member.id, member.guild?.id);
-  const vcHours = Number(activity.vc_seconds || 0) / 3600;
   return new EmbedBuilder()
     .setTitle(`👤 ${member.displayName} • VEHICLE LIFE`)
     .setDescription(`🧑‍✈️ Driver Level **${p.driver_level}** • **${p.driver_xp} XP**\n💰 Balance **${money(p.balance)}**`)
     .addFields(
       { name: '🚗 Garage', value: `${owned.length}/${V.length} vehicles`, inline: true },
-      { name: '🎙️ VC Time', value: `${vcHours.toFixed(1)} hours`, inline: true },
-      { name: '💬 Messages', value: Number(activity.messages || 0).toLocaleString(), inline: true },
       { name: '🏁 Race Car', value: p.race_vehicle_id && V[p.race_vehicle_id - 1] ? `${V[p.race_vehicle_id - 1].emoji} ${V[p.race_vehicle_id - 1].name}` : 'Not selected', inline: true },
       { name: '🏆 Best Vehicle', value: best ? `${best.emoji} ${best.name}\nClass ${best.class} • ⚡ ${best.performance}` : 'None', inline: true }
-    )
-    .setFooter({ text: 'Vehicle Life • Be active. Build your garage.' });
+    );
 }
 
 function mainMenuRows() {
@@ -707,9 +677,11 @@ async function handle(message) {
   const uid = message.author.id;
 
   try {
-    await ensureRacerRole(message.member).catch(() => null);
+    await ensureRacerRole(message.member);
+    await profile(gid, uid);
+    const ownedAtStart = await vehiclesOf(gid, uid);
+    if (!ownedAtStart.length) await grantProgressionVehicle(gid, uid, 1);
     await ensureDailyMissions(gid, uid);
-    await syncPlayerProgression(gid, uid);
 
     if (cmd === '?menu') {
       const p = await profile(gid, uid);
@@ -729,7 +701,7 @@ async function handle(message) {
       const yesterday = new Date(Date.now() - 24 * 60 * 60 * 1000);
       const yesterdayKey = new Intl.DateTimeFormat('en-CA', { timeZone: process.env.PROGRESSION_TIMEZONE || 'Asia/Kolkata', year:'numeric', month:'2-digit', day:'2-digit' }).format(yesterday);
       const streak = p.daily_claimed_on === yesterdayKey ? Number(p.daily_streak || 0) + 1 : 1;
-      const reward = 10000 + Math.min(streak, 30) * 1000;
+      const reward = Math.min(40000, 10000 + Math.max(0, Math.min(streak - 1, 29)) * 1000);
       const u = await sb.from('game_profiles').update({ daily_claimed_on: today, daily_streak: streak }).eq('guild_id', gid).eq('user_id', uid);
       if (u.error) throw u.error;
       await changeBalance(gid, uid, reward, 'daily_reward', today);
@@ -796,11 +768,30 @@ async function handle(message) {
       if (r.error) throw r.error;
       return message.reply(`🏁 **Race vehicle set:** ${v.emoji} **${v.name}** (#${v.id})`);
     }
+    if (cmd === '?solorace' || cmd === '?distance') {
+      const raw = String(args[0] || '1k').toLowerCase().replace(/,/g, '');
+      const presets = { '1k': [1,60,25000], '1km': [1,60,25000], '5k': [5,180,100000], '5km': [5,180,100000], '10k': [10,300,250000], '10km': [10,300,250000], '25k': [25,600,500000], '25km': [25,600,500000] };
+      const parsed = presets[raw] || (() => { const n = Number(raw.replace(/km?$/,'')); return Number.isFinite(n) && n > 0 && n <= 50 ? [n, Math.round(n * 60), Math.round(n * 20000)] : null; })();
+      if (!parsed) return message.reply('❌ Choose a distance: `?solorace 1k`, `5k`, `10k`, or `25k`.');
+      const [distanceKm, targetSeconds, reward] = parsed;
+      const result = await runRace(message.guild, message.member, 'solo', null, { distanceKm, targetSeconds, soloReward: reward });
+      return message.reply(raceText(`SOLO ${distanceKm}KM`, result));
+    }
     if (cmd === '?racecar') {
-      const p = await profile(gid, uid);
-      const v = p.race_vehicle_id ? V[p.race_vehicle_id - 1] : null;
-      const o = v ? await own(gid, uid, v) : null;
-      return message.reply(v && o ? `🏁 **YOUR RACE CAR**\n${v.emoji} **${v.name}** • Class ${v.class} • ⚡ ${v.performance}\nCondition: **${o.condition}%**` : '🏁 No race vehicle selected. Use `?setasracecar <vehicle>`.' );
+      const target = message.mentions.members.first();
+      const targetId = target?.id || uid;
+      const tp = await profile(gid, targetId);
+      const tv = tp.race_vehicle_id ? V[Number(tp.race_vehicle_id) - 1] : null;
+      const to = tv ? await own(gid, targetId, tv) : null;
+      if (!tv || !to) return message.reply(target ? `❌ ${target} has no selected race car.` : '🏁 No race vehicle selected. Use `?setasracecar <vehicle>`.');
+      const ts = vehicleStats(tv, to);
+      const overall = Math.round((ts.power + ts.speed + ts.accel + ts.handling + ts.braking + ts.launch) / 6);
+      const ownerName = target ? target.displayName : message.member.displayName;
+      const embed = new EmbedBuilder()
+        .setTitle(`🏎️ ${ownerName} • RACE CAR`)
+        .setDescription(`${tv.emoji} **${tv.name}**\nLevel **${to.level}** • ${tv.rarity} • Class **${tv.class}**\nCondition **${to.condition}%**\n\n💪 Power: **${ts.power}**\n⚡ Top Speed: **${ts.speed} km/h**\n🚀 Acceleration: **${ts.accel}**\n🎯 Handling: **${ts.handling}**\n🛑 Braking: **${ts.braking}**\n⚖️ Weight: **${ts.weight} kg**\n🟢 Launch: **${ts.launch}**\n\n⭐ Overall: **${overall}**`)
+        .setFooter({ text: 'Vehicle Life • Race Car Inspection' });
+      return message.reply({ embeds: [embed], files: [{ attachment: vehicleImage(tv), name: imageName(tv) }] });
     }
     if (['?race', '?drag', '?trackrace', '?timetrial'].includes(cmd)) {
       const target = message.mentions.members.first();
@@ -813,13 +804,13 @@ async function handle(message) {
       const opponent = await profile(gid, target.id);
       if (!opponent.race_vehicle_id || !(await own(gid, target.id, V[Number(opponent.race_vehicle_id) - 1]))) return message.reply(`❌ ${target} has not selected a valid race vehicle.`);
       const id = `${gid}:${uid}:${target.id}:${Date.now()}`;
-      pendingRaces.set(id, { guildId: gid, from: uid, to: target.id, type, expires: Date.now() + 120000 });
+      pendingRaces.set(id, { guildId: gid, from: uid, to: target.id, type, channelId: message.channel.id, expires: Date.now() + 120000 });
       const row = new ActionRowBuilder().addComponents(
         new ButtonBuilder().setCustomId(`raceaccept:${id}`).setLabel('Accept Race').setEmoji('🏁').setStyle(ButtonStyle.Success),
         new ButtonBuilder().setCustomId(`racedecline:${id}`).setLabel('Decline').setEmoji('✖️').setStyle(ButtonStyle.Danger)
       );
       try {
-        await target.send({ content: `🏁 **RACE CHALLENGE**\n${message.member} challenged you to a **${type.toUpperCase()}** race.\nYou have **2 minutes** to respond.`, components: [row] });
+        await target.send({ content: `🏁 **RACE CHALLENGE**\n${message.member} challenged you to a **${type.toUpperCase()}** race.\nOnly you can accept or reject.\nYou have **2 minutes** to respond.`, components: [row] });
         return message.reply(`🏁 ${target}, challenge sent privately. **Only you can see the Accept/Decline buttons.**`);
       } catch {
         pendingRaces.delete(id);
@@ -878,33 +869,7 @@ async function handle(message) {
       }
     }
     if (cmd === '?customize' || cmd === '?paint') {
-      const components = ['paint','wheels','tires','spoiler','bumpers','hood','exhaust','neon','headlights','taillights','windows'];
-      let v, component, value;
-      if (cmd === '?paint') {
-        v = findVehicle(args.slice(0, -1).join(' '));
-        component = 'paint';
-        value = args.at(-1);
-      } else if (content.includes('|')) {
-        const pieces = content.replace(/^\?customize\s*/i, '').split('|').map(x => x.trim());
-        v = findVehicle(pieces[0]);
-        component = String(pieces[1] || '').toLowerCase();
-        value = pieces.slice(2).join(' ').trim();
-      } else {
-        component = String(args.at(-2) || '').toLowerCase();
-        value = args.at(-1);
-        v = findVehicle(args.slice(0, -2).join(' '));
-      }
-      const o = v && await own(gid, uid, v);
-      if (!v || !o || !components.includes(component) || !value) return message.reply('❌ Use `?paint <vehicle> <value>` or `?customize <vehicle> <component> <value>`. Components: paint, wheels, tires, spoiler, bumpers, hood, exhaust, neon, headlights, taillights, windows.');
-      const cost = component === 'paint' ? 5000 : 7500;
-      await changeBalance(gid, uid, -cost, 'customization', `${v.id}:${component}`, { component, value }, false);
-      const custom = { ...safeJson(o.custom), [component]: value.slice(0, 40) };
-      const r = await sb.from('user_vehicles').update({ custom, updated_at: new Date().toISOString() }).eq('id', o.id).eq('guild_id', gid).eq('user_id', uid);
-      if (r.error) {
-        await changeBalance(gid, uid, cost, 'customization_refund', `${v.id}:${component}`, { component, value }, false).catch(() => {});
-        throw r.error;
-      }
-      return message.reply(`🎨 **${v.name}** ${component} set to **${value}** for **${money(cost)}**.`);
+      return message.reply('❌ Vehicle customization has been removed. Vehicle Life now focuses on performance, racing and progression.');
     }
     if (cmd === '?upgrade') {
       const type = String(args[0] || '').toLowerCase();
@@ -915,7 +880,7 @@ async function handle(message) {
       const upgrades = { ...safeJson(o.upgrades) };
       const level = Number(upgrades[type] || 0);
       if (level >= 10) return message.reply('❌ That upgrade is already level 10.');
-      const cost = 15000 * (level + 1);
+      const cost = Math.max(15000, Math.round((v.price * 0.0005 * (level + 1)) / 1000) * 1000);
       await changeBalance(gid, uid, -cost, 'upgrade', `${v.id}:${type}`, { type, level: level + 1 }, false);
       upgrades[type] = level + 1;
       const r = await sb.from('user_vehicles').update({ upgrades, updated_at: new Date().toISOString() }).eq('id', o.id).eq('guild_id', gid).eq('user_id', uid);
@@ -925,7 +890,12 @@ async function handle(message) {
       }
       await addDriverXp(gid, uid, 75);
       await updateMission(gid, uid, 'upgrade', 1);
-      return message.reply(`🔧 **${v.name}** ${UPGRADES[type].label} → **Lv.${level + 1}** for **${money(cost)}**.`);
+      const before = vehicleStats(v, o);
+      const after = vehicleStats(v, { ...o, upgrades });
+      const statLines = [['Power','power','💪'],['Top Speed','speed','⚡'],['Acceleration','accel','🚀'],['Handling','handling','🎯'],['Braking','braking','🛑'],['Weight','weight','⚖️'],['Launch','launch','🟢']]
+        .filter(([,k]) => Number(before[k]) !== Number(after[k]))
+        .map(([label,k,e]) => `${e} **${label}:** ${before[k]} → **${after[k]}**`).join('\n');
+      return message.reply(`🔧 **UPGRADE COMPLETE**\n\n🏎️ **${v.name}**\n🛠️ ${UPGRADES[type].label} **Lv.${level + 1}**\n\n${statLines || 'No performance stat changed.'}\n\n💰 Cost: **${money(cost)}**`);
     }
     if (cmd === '?repair') {
       const v = findVehicle(args.join(' '));
@@ -1192,13 +1162,17 @@ async function handle(message) {
       if (entry.error) throw entry.error;
       const players = await sb.from('event_entries').select('id', { count: 'exact', head: true }).eq('event_id', event.id);
       if (players.error) throw players.error;
-      const prizes = Array.isArray(event.rewards?.prizes) && event.rewards.prizes.length >= 3 ? event.rewards.prizes.slice(0, 3).map(Number) : [100000, 70000, 40000];
+      const prizes = eventPrizes(event.rewards);
+    const reward = prizes.reduce((a,b)=>a+b,0);
       const embed = new EmbedBuilder()
         .setTitle(`🎉 EVENT CENTER • ${event.name.toUpperCase()}`)
         .setDescription(`🏁 **Complete races and climb the live leaderboard.**\n\n${event.description || 'Compete in Vehicle Life races.'}`)
         .addFields(
           { name: '🎟️ Entry', value: Number(event.entry_fee || 0) ? money(event.entry_fee) : 'FREE', inline: true },
-          { name: '🏆 Prize Pool', value: `🥇 ${money(prizes[0])}\n🥈 ${money(prizes[1])}\n🥉 ${money(prizes[2])}\n💰 Total ${money(prizes[0] + prizes[1] + prizes[2])}`, inline: false },
+          { name: '💰 Prize Pool', value: reward ? money(reward) : 'Configured', inline: true },
+          { name: '🥇 1st', value: money(prizes[0]), inline: true },
+          { name: '🥈 2nd', value: money(prizes[1]), inline: true },
+          { name: '🥉 3rd', value: money(prizes[2]), inline: true },
           { name: '👥 Drivers', value: `**${players.count || 0}**`, inline: true },
           { name: '⏳ Ends', value: `<t:${Math.floor(new Date(event.ends_at).getTime() / 1000)}:R>`, inline: true },
           { name: '👤 Your Score', value: entry.data ? `**${Number(entry.data.score || 0)} pts**` : '**Not joined**', inline: true }
@@ -1317,13 +1291,18 @@ async function handle(message) {
 async function handleButton(interaction) {
   if (!interaction.isButton()) return false;
   try {
+    await ensureRacerRole(interaction.member);
+    if (interaction.guild?.id && interaction.user?.id) {
+      await profile(interaction.guild.id, interaction.user.id);
+      const buttonOwned = await vehiclesOf(interaction.guild.id, interaction.user.id);
+      if (!buttonOwned.length) await grantProgressionVehicle(interaction.guild.id, interaction.user.id, 1);
+    }
     const id = String(interaction.customId || '');
 
     if (id.startsWith('vlmenu:')) {
       const action = id.split(':')[1];
       await interaction.deferUpdate();
       const gid = interaction.guild.id, uid = interaction.user.id;
-      await ensureRacerRole(interaction.member).catch(() => null);
       if (action === 'main') {
         const p = await profile(gid, uid);
         return interaction.editReply({ embeds: [new EmbedBuilder().setTitle('🚗 VEHICLE LIFE • MAIN MENU').setDescription(`Welcome **${interaction.member.displayName}**!\n\nUse the buttons below to manage your garage, race, rewards, marketplace and events.\n\n💰 Balance: **${money(p.balance)}** • 🧑‍✈️ Level: **${p.driver_level}**`).setColor(0x168cff)], components: mainMenuRows() });
@@ -1342,7 +1321,7 @@ async function handleButton(interaction) {
         const yesterday = new Date(Date.now() - 86400000);
         const ykey = new Intl.DateTimeFormat('en-CA', { timeZone: process.env.PROGRESSION_TIMEZONE || 'Asia/Kolkata', year:'numeric', month:'2-digit', day:'2-digit' }).format(yesterday);
         const streak = p.daily_claimed_on === ykey ? Number(p.daily_streak || 0) + 1 : 1;
-        const reward = 10000 + Math.min(streak, 30) * 1000;
+        const reward = Math.min(40000, 10000 + Math.max(0, Math.min(streak - 1, 29)) * 1000);
         const u = await sb.from('game_profiles').update({ daily_claimed_on: today, daily_streak: streak }).eq('guild_id', gid).eq('user_id', uid); if (u.error) throw u.error;
         await changeBalance(gid, uid, reward, 'daily_reward', today); await addDriverXp(gid, uid, 50);
         return interaction.editReply({ content: `🎁 **Daily Reward Claimed!**\n💰 ${money(reward)}\n🔥 Streak: **${streak}**\n🧑‍✈️ +50 XP`, embeds: [], components: mainMenuRows() });
@@ -1378,13 +1357,17 @@ async function handleButton(interaction) {
         if (entry.error) throw entry.error;
         const players = await sb.from('event_entries').select('id', { count: 'exact', head: true }).eq('event_id', event.id);
         if (players.error) throw players.error;
-        const reward = Number(event.rewards?.cash || 0);
+        const prizes = eventPrizes(event.rewards);
+        const reward = prizes.reduce((a,b)=>a+b,0);
         const embed = new EmbedBuilder()
           .setTitle(`🎉 EVENT CENTER • ${event.name.toUpperCase()}`)
           .setDescription(`🏁 **Complete races and climb the live leaderboard.**\n\n${event.description || 'Compete in Vehicle Life races.'}`)
           .addFields(
             { name: '🎟️ Entry', value: Number(event.entry_fee || 0) ? money(event.entry_fee) : 'FREE', inline: true },
-            { name: '🏆 Prize Pool', value: `🥇 ${money(prizes[0])}\n🥈 ${money(prizes[1])}\n🥉 ${money(prizes[2])}\n💰 Total ${money(prizes[0] + prizes[1] + prizes[2])}`, inline: false },
+            { name: '💰 Prize Pool', value: reward ? money(reward) : 'Configured', inline: true },
+          { name: '🥇 1st', value: money(prizes[0]), inline: true },
+          { name: '🥈 2nd', value: money(prizes[1]), inline: true },
+          { name: '🥉 3rd', value: money(prizes[2]), inline: true },
             { name: '👥 Drivers', value: `**${players.count || 0}**`, inline: true },
             { name: '⏳ Ends', value: `<t:${Math.floor(new Date(event.ends_at).getTime() / 1000)}:R>`, inline: true },
             { name: '👤 Your Score', value: entry.data ? `**${Number(entry.data.score || 0)} pts**` : '**Not joined**', inline: true }
@@ -1493,7 +1476,11 @@ async function handleButton(interaction) {
       const b = await guild.members.fetch(r.to).catch(() => null);
       if (!a || !b) return interaction.editReply({ content: '❌ One of the players is no longer in the server.', components: [] });
       const result = await runRace(guild, a, r.type, b);
-      return interaction.editReply({ content: `🏁 **RACE ACCEPTED**\n${raceText(r.type, result)}\n\n👤 Challenger: <@${r.from}>\n👤 Accepted by: <@${r.to}>`, components: [] });
+      const resultMessage = `🏁 **RACE RESULT**\n\n${raceText(r.type, result)}\n\n👤 Challenger: <@${r.from}>\n👤 Accepted by: <@${r.to}>`;
+      await interaction.editReply({ content: '✅ Race accepted. The result has been posted in the original race channel.', components: [] });
+      const channel = guild.channels.cache.get(r.channelId);
+      if (channel?.isTextBased()) await channel.send({ content: resultMessage }).catch(() => {});
+      return true;
     }
     if (interaction.customId.startsWith('betdecline:')) {
       const id = interaction.customId.slice(11), b = pendingBets.get(id);
@@ -1543,8 +1530,6 @@ async function handleButton(interaction) {
         if (channel && typeof channel.send === 'function') {
           await channel.send({ content: resultMessage }).catch(() => {});
         }
-        await a.send({ content: resultMessage }).catch(() => {});
-        await o.send({ content: resultMessage }).catch(() => {});
         return true;
       } catch (e) {
         await changeBalance(b.guildId, b.from, b.amount, 'bet_refund', id, {}, false).catch(() => {});
@@ -1596,7 +1581,6 @@ module.exports = {
   vehicles: V,
   startAutomation,
   grantProgressionVehicle,
-  syncPlayerProgression,
   getTopGarages: topGarages,
   profile,
   vehiclesOf,
