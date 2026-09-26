@@ -49,9 +49,15 @@ function vehicleAttachment(vehicle) {
   });
 }
 
-function profileEmbed(member, user) {
-  const current = currentVehicle(user);
-  const next = nextVehicle(user);
+function profileEmbed(member, user, gameOwned = null, gameProfile = null) {
+  const merged = {
+    ...user,
+    gameProfile: gameProfile || user.gameProfile,
+    gameOwned: Array.isArray(gameOwned) ? gameOwned : user.gameOwned
+  };
+  const ownedCount = Array.isArray(merged.gameOwned) ? merged.gameOwned.length : Number(merged.vehicle_index || 0);
+  const current = currentVehicle(merged);
+  const next = nextVehicle({ ...merged, vehicle_index: ownedCount });
 
   const embed = new EmbedBuilder()
     .setTitle(`🚗 ${member.displayName}'s Vehicle Life`)
@@ -73,13 +79,13 @@ function profileEmbed(member, user) {
       },
       {
         name: "🚗 Vehicles",
-        value: `${user.gameOwned ? user.gameOwned.length : user.vehicle_index} / ${vehicles.length}`,
+        value: `${ownedCount} / ${vehicles.length}`,
         inline: true
       },
       {
         name: "🏁 Race Car",
-        value: user.gameProfile?.race_vehicle_id && vehicles[user.gameProfile.race_vehicle_id - 1]
-          ? `${vehicles[user.gameProfile.race_vehicle_id - 1].emoji} ${vehicles[user.gameProfile.race_vehicle_id - 1].name}`
+        value: merged.gameProfile?.race_vehicle_id && vehicles[merged.gameProfile.race_vehicle_id - 1]
+          ? `${vehicles[merged.gameProfile.race_vehicle_id - 1].emoji} ${vehicles[merged.gameProfile.race_vehicle_id - 1].name}`
           : "Not selected",
         inline: true
       }
@@ -111,10 +117,15 @@ function profileEmbed(member, user) {
         `💬 ${next.messages.toLocaleString()} messages • ${msgPct}%\n` +
         `\`${progressBar(vc, next.vcHours)}\` VC`
     });
-  } else {
+  } else if (ownedCount >= vehicles.length) {
     embed.addFields({
       name: "🏆 Collection Complete",
       value: "You have unlocked every vehicle!"
+    });
+  } else {
+    embed.addFields({
+      name: "🔓 Progression",
+      value: `You own **${ownedCount}/${vehicles.length}** vehicles. Keep playing to unlock more.`
     });
   }
 

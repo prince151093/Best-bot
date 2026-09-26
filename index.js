@@ -12,7 +12,8 @@ const {
 const config = require("./config");
 const vehicleGame = require("./game");
 const competitive = require("./competitive");
-const { init: initDb, close: closeDb } = require("./db");
+const { init: initDb, close: closeDb, getUser } = require("./db");
+const { ensureRacerRole } = require("./server-settings");
 
 if (!config.token) {
   console.error("Missing DISCORD_TOKEN environment variable.");
@@ -158,18 +159,23 @@ client.on("interactionCreate", async interaction => {
       return;
     }
 
+    await ensureRacerRole(interaction.member).catch(() => null);
+    await vehicleGame.syncPlayerProgression(gid, uid);
+
     if (interaction.commandName === "profile") {
       await interaction.deferReply();
       const profile = await vehicleGame.profile(gid, uid);
       const owned = await vehicleGame.vehiclesOf(gid, uid);
+      const activity = getUser(uid, gid);
       const best = owned
         .map(o => vehicleGame.vehicles[o.vehicle_id - 1])
         .filter(Boolean)
         .sort((a, b) => (b.performance || 0) - (a.performance || 0))[0];
 
-      const { profileEmbed } = require("./cards");
+      const { profileEmbed, profileFiles } = require("./cards");
       return interaction.editReply({
-        embeds: [profileEmbed(interaction.member, profile, owned, best)]
+        embeds: [profileEmbed(interaction.member, { ...activity, gameProfile: profile, gameOwned: owned }, owned, profile)],
+        files: profileFiles({ ...activity, gameProfile: profile, gameOwned: owned })
       });
     }
 

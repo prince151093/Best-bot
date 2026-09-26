@@ -8,6 +8,7 @@ const sb = createClient(config.supabaseUrl, config.supabaseServiceRoleKey, {
 });
 
 const CACHE_FILE = path.join(__dirname, 'garage-role-cache.json');
+const RACER_ROLE_NAME = process.env.RACER_ROLE_NAME || 'Racers🏎';
 let cache = {};
 try {
   cache = JSON.parse(fs.readFileSync(CACHE_FILE, 'utf8')) || {};
@@ -46,6 +47,33 @@ async function memberHasGarageRole(guildId, member) {
   return Boolean(member?.roles?.cache?.has(roleId));
 }
 
+
+function findRacerRole(guild) {
+  if (!guild?.roles?.cache) return null;
+  return guild.roles.cache.find(role => role.name === RACER_ROLE_NAME) || null;
+}
+
+async function ensureRacerRole(member) {
+  if (!member?.guild || !member?.roles?.add) return null;
+  const role = findRacerRole(member.guild);
+  if (!role) return null;
+  if (member.roles.cache.has(role.id)) return role;
+  if (!member.guild.members.me?.permissions?.has('ManageRoles')) return null;
+  if (role.position >= member.guild.members.me.roles.highest.position) return null;
+  try {
+    await member.roles.add(role, 'Vehicle Life player');
+    return role;
+  } catch (err) {
+    console.error(`Could not assign ${RACER_ROLE_NAME} role to ${member.id}:`, err.message || err);
+    return null;
+  }
+}
+
+async function racerRoleMention(guild) {
+  const role = findRacerRole(guild);
+  return role ? `<@&${role.id}>` : '';
+}
+
 async function garageRoleMention(guildId) {
   const roleId = await getGarageRoleId(guildId);
   return roleId ? `<@&${roleId}>` : '';
@@ -56,5 +84,9 @@ module.exports = {
   setGarageRoleId,
   getGarageRoleId,
   memberHasGarageRole,
-  garageRoleMention
+  garageRoleMention,
+  findRacerRole,
+  ensureRacerRole,
+  racerRoleMention,
+  RACER_ROLE_NAME
 };
